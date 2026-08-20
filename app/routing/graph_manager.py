@@ -44,8 +44,9 @@ class RoadNetworkGraph:
         frontend map has coordinates to render) plus routing attributes.
         """
         self.graph = nx.DiGraph()
-        origin_lat, origin_lng = 13.0827, 80.2707  # Chennai-ish origin, arbitrary for the mock grid
-        lat_step, lng_step = 0.003, 0.003
+        # Anna Nagar, Chennai (Tower / 2nd Avenue grid)
+        origin_lat, origin_lng = 13.0850, 80.2101
+        lat_step, lng_step = 0.0022, 0.0022
 
         for r in range(grid_rows):
             for c in range(grid_cols):
@@ -216,6 +217,54 @@ class RoadNetworkGraph:
             "max_lat": max(lats),
             "min_lng": min(lngs),
             "max_lng": max(lngs),
+        }
+
+    def to_geojson(self, name: str = "Anna Nagar Road Network") -> dict:
+        """Export the live graph as a GeoJSON FeatureCollection of LineStrings."""
+        features: List[dict] = []
+        for u, v, data in self.graph.edges(data=True):
+            u_coord = self.get_node_coord(str(u))
+            v_coord = self.get_node_coord(str(v))
+            if u_coord is None or v_coord is None:
+                continue
+            u_lat, u_lng = u_coord
+            v_lat, v_lng = v_coord
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": data.get("edge_id", f"{u}->{v}"),
+                    "properties": {
+                        "edge_id": data.get("edge_id", f"{u}->{v}"),
+                        "from": str(u),
+                        "to": str(v),
+                        "weight": round(float(data.get("weight", 0.0) or 0.0), 4),
+                        "base_weight": round(float(data.get("base_weight", 0.0) or 0.0), 4),
+                        "congestion": round(float(data.get("congestion", 0.0) or 0.0), 4),
+                        "length_m": float(data.get("length_m", 0.0) or 0.0),
+                    },
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[u_lng, u_lat], [v_lng, v_lat]],
+                    },
+                }
+            )
+
+        bounds = self.get_graph_bounds() or {}
+        return {
+            "type": "FeatureCollection",
+            "name": name,
+            "bbox": [
+                bounds.get("min_lng", 80.2101),
+                bounds.get("min_lat", 13.0850),
+                bounds.get("max_lng", 80.2101),
+                bounds.get("max_lat", 13.0850),
+            ],
+            "metadata": {
+                "area": "Anna Nagar, Chennai",
+                "nodes": self.graph.number_of_nodes(),
+                "edges": self.graph.number_of_edges(),
+            },
+            "features": features,
         }
 
 

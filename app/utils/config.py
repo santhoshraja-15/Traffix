@@ -30,7 +30,15 @@ class Settings:
     port: int = int(os.getenv("TRAFFICX_PORT", "8000"))
 
     cors_allow_origins: List[str] = field(
-        default_factory=lambda: _env_list("TRAFFICX_CORS_ORIGINS", ["*"])
+        default_factory=lambda: _env_list(
+            "TRAFFICX_CORS_ORIGINS",
+            [
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:3001",
+                "http://127.0.0.1:3001",
+            ],
+        )
     )
 
     # Simulation defaults

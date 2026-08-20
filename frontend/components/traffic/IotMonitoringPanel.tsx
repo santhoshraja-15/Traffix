@@ -60,18 +60,22 @@ export default function IotMonitoringPanel() {
       const densities: RoadDensity[] = await fetchRoadDensities();
       setDevices((prev) => {
         const updated = [...prev];
-        densities.forEach((d) => {
-          const idx = ROAD_TO_DEVICE[d.roadId];
-          if (idx !== undefined && updated[idx].status === "active") {
-            updated[idx] = {
-              ...updated[idx],
-              avgSpeedKmh: d.avgSpeedKmh,
-              occupancyPct: d.occupancyPct,
-              vehicleCount: Math.round(d.vehiclesPerKm * 0.4),
-              lastUpdatedAt: Date.now(),
-            };
-          }
-        });
+        if (Array.isArray(densities)) {
+          densities.forEach((d) => {
+            const idx = ROAD_TO_DEVICE[d.roadId];
+            if (idx !== undefined && updated[idx].status === "active") {
+              updated[idx] = {
+                ...updated[idx],
+                avgSpeedKmh: d.avgSpeedKmh,
+                occupancyPct: d.occupancyPct,
+                vehicleCount: Math.round(d.vehiclesPerKm * 0.4),
+                lastUpdatedAt: Date.now(),
+              };
+            }
+          });
+        } else {
+          console.warn("[TRAFFIX] fetchRoadDensities did not return an array", densities);
+        }
         return updated;
       });
     } finally {

@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api import accidents, ambulance, analysis, health, navigation, simulation, traffic
+from app.api import accidents, ambulance, analysis, health, navigation, network, simulation, traffic
 
 api_router = APIRouter()
 api_router.include_router(health.router)
+api_router.include_router(network.router)
 api_router.include_router(navigation.router)
 api_router.include_router(traffic.router)       # Includes WS /realtime/{simulation_id}
 api_router.include_router(accidents.router)

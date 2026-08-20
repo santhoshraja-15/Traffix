@@ -80,7 +80,7 @@ export default function TrafficKpiOverview({
       {/* KPI 4: Active Incidents */}
       <div className="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs card-hover flex items-center gap-3">
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center border shrink-0 ${
-          activeIncidentsCount > 0
+          (activeIncidentsCount || 0) > 0
             ? "bg-red-50 text-red-600 border-red-200 animate-pulse"
             : "bg-slate-50 text-slate-500 border-slate-200"
         }`}>
@@ -92,12 +92,12 @@ export default function TrafficKpiOverview({
           </span>
           <div className="flex items-baseline gap-1.5">
             <span className={`text-lg font-black tabular-nums ${
-              activeIncidentsCount > 0 ? "text-red-600" : "text-slate-800"
+              (activeIncidentsCount || 0) > 0 ? "text-red-600" : "text-slate-800"
             }`}>
-              {activeIncidentsCount}
+              {Number.isNaN(activeIncidentsCount) ? 0 : activeIncidentsCount}
             </span>
             <span className="text-[10px] font-bold text-slate-400">
-              {activeIncidentsCount > 0 ? "Action Needed" : "All Clear"}
+              {(activeIncidentsCount || 0) > 0 ? "Action Needed" : "All Clear"}
             </span>
           </div>
         </div>

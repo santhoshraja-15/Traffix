@@ -1,13 +1,31 @@
 """
-Simulation lifecycle manager.
+Simulation lifecycle manager — SUMO-Backend Bridge Edition.
 
 Owns the background async tick loop for each running simulation. On every tick
 (once per second) it:
-  1. Mutates mock sensor readings on the RoadNetworkGraph edges.
-  2. Calls TrafficModelAdapter to produce congestion predictions.
-  3. Applies those predictions back to the graph via update_edge_weights().
-  4. Broadcasts a TrafficUpdate-compatible JSON payload to all subscribed
-     WebSocket clients via ConnectionManager.
+
+  1. [THREAD]  Advances SUMO via traci.simulationStep() AND reads per-edge
+               metrics — both in a single synchronous call submitted to the
+               SumoBridge's **dedicated** ThreadPoolExecutor(max_workers=1).
+
+               Thread-affinity note: TraCI is single-threaded and expects
+               every call to originate from the same OS thread that spawned
+               the SUMO process.  We NEVER use the default thread pool
+               (run_in_executor(None, ...)) for TraCI calls.  The bridge's
+               1-worker executor is the sole gateway — the same thread steps
+               SUMO for the entire lifetime of the simulation.
+
+  2. [ASYNC]   If SUMO data arrived → write metrics to RoadNetworkGraph edges.
+               If SUMO absent/failed → fall back to mock sensor jitter.
+
+  3. [ASYNC]   Pass raw SUMO metrics into app.state.ml_engine.predict_batch()
+               via SumoBridge.build_v15_raw_features() which maps TraCI data
+               to the exact 53-column V15 feature contract.
+
+  4. [ASYNC]   Apply risk scores → dynamic edge cost update.
+
+  5. [ASYNC]   Broadcast JSON payload (AI risk scores + edge costs) to all
+               subscribed WebSocket clients.
 
 ``await asyncio.sleep(1)`` at the end of every tick yields control back to the
 FastAPI event loop so HTTP requests are never blocked.
@@ -15,12 +33,16 @@ FastAPI event loop so HTTP requests are never blocked.
 from __future__ import annotations
 
 import asyncio
+import functools
 import random
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from app.core.websocket_manager import websocket_manager
 from app.integrations.existing_ml_adapter import TrafficModelAdapter, get_model_adapter
+from app.integrations.sumo_bridge import SUMO_AVAILABLE, SumoBridge
+from app.ml.model_registry import model_registry
+from app.ml.predictor import predict as predict_v16_risk
 from app.models.simulation_models import SimulationConfig
 from app.routing.graph_manager import RoadNetworkGraph, get_road_network_graph
 from app.utils.constants import CongestionLevel, SimulationStatus, UpdateType
@@ -51,6 +73,49 @@ class SimulationManager:
         self._tick_counts: Dict[str, int] = {}
         # Track the config each simulation was started with (used for rainfall etc.).
         self._configs: Dict[str, SimulationConfig] = {}
+        # V15 ML engine injected from main.py lifespan so the tick loop can
+        # call predict() without going through app.state.
+        self._ml_engine = None
+        # SumoBridge singleton — set once when SUMO mode is active.
+        self._sumo_bridge = None
+
+    # ------------------------------------------------------------------
+    # ML engine injection (called from main.py lifespan)
+    # ------------------------------------------------------------------
+
+    def set_ml_engine(self, ml_engine: Any) -> None:
+        """
+        Inject the V15 TrafficModelAdapter loaded during FastAPI startup.
+
+        Call this from the lifespan context manager *after*
+        ``app.state.ml_engine`` has been initialised so the tick loop can
+        use it without holding a reference to ``app.state``.
+        """
+        self._ml_engine = ml_engine
+        logger.info(
+            "SimulationManager: ml_engine injected — %s",
+            repr(ml_engine),
+        )
+
+    # ------------------------------------------------------------------
+    # SUMO bridge injection (optional — called when SUMO is available)
+    # ------------------------------------------------------------------
+
+    def set_sumo_bridge(self, bridge: Any) -> None:
+        """
+        Inject an initialised SumoBridge so the tick loop uses real TraCI data.
+
+        If never called (or called with None), the tick loop falls back to the
+        existing mock sensor path — the server always keeps running.
+        """
+        self._sumo_bridge = bridge
+        if bridge is not None:
+            logger.info(
+                "SimulationManager: SumoBridge injected — "
+                "SUMO mode active (dedicated executor, max_workers=1)."
+            )
+        else:
+            logger.info("SimulationManager: SumoBridge cleared — mock mode.")
 
     # ------------------------------------------------------------------
     # Public lifecycle API
@@ -63,12 +128,13 @@ class SimulationManager:
         Safe to call even if a loop is already running for that id — the old
         task is cancelled first so there are never two loops competing.
         """
-        if simulation_id in self._tasks:
-            logger.warning(
-                "Simulation %s already running — cancelling old loop before restart.",
+        existing = self._tasks.get(simulation_id)
+        if existing is not None and not existing.done():
+            logger.info(
+                "Simulation %s already running — keeping the existing tick loop.",
                 simulation_id,
             )
-            self.stop(simulation_id)
+            return
 
         self._configs[simulation_id] = config
         self._tick_counts[simulation_id] = 0
@@ -126,12 +192,10 @@ class SimulationManager:
         config: SimulationConfig,
     ) -> None:
         """
-        Inject randomised mock sensor readings into each graph edge so the ML
-        adapter has fresh feature data on every tick.
+        Inject randomised mock sensor readings into each graph edge.
 
-        In production this would be replaced by real telemetry ingestion
-        (e.g. SUMO TraCI readings or a Kafka consumer). For the hackathon demo
-        we jitter the previous values so the UI shows plausible movement.
+        Used as the fallback path when SUMO is not connected. Jitters
+        previous values so the UI shows plausible movement.
         """
         density = config.vehicle_density  # 0.0 – 1.0
         rainfall = config.rainfall  # 0.0 – 1.0
@@ -140,14 +204,12 @@ class SimulationManager:
         for u, v, data in graph.graph.edges(data=True):
             capacity: float = float(data.get("capacity", 120))
 
-            # Vehicle count scales with density + some randomness.
             base_vehicles = density * capacity
             jitter = random.uniform(-0.15, 0.15) * capacity
             if accident_active:
-                jitter -= 0.1 * capacity  # accidents reduce throughput upstream
+                jitter -= 0.1 * capacity
             vehicle_count = max(0, min(capacity * 1.5, base_vehicles + jitter))
 
-            # Average speed inversely proportional to occupancy, further reduced by rain.
             occupancy = vehicle_count / max(1.0, capacity)
             avg_speed = max(5.0, 60.0 * (1.0 - occupancy) * (1.0 - rainfall * 0.4))
 
@@ -155,48 +217,175 @@ class SimulationManager:
             data["avg_speed"] = round(avg_speed, 2)
             data["rainfall"] = rainfall
 
+    def _apply_sumo_metrics_to_graph(
+        self,
+        graph: RoadNetworkGraph,
+        raw_metrics: list[Dict[str, Any]],
+    ) -> None:
+        """
+        Write live SUMO telemetry back onto the matching graph edges so the
+        rest of the pipeline (pathfinding, broadcast) sees real data.
+
+        Edges that exist in SUMO but not in the graph are silently skipped —
+        the graph is our authoritative routing structure.
+        """
+        sumo_lookup = {m["edge_id"]: m for m in raw_metrics}
+        for u, v, data in graph.graph.edges(data=True):
+            edge_id = str(data.get("edge_id", f"{u}->{v}"))
+            m = sumo_lookup.get(edge_id)
+            if m is None:
+                continue
+            data["vehicle_count"] = m["vehicle_count"]
+            data["avg_speed"] = m["average_speed_kmh"]
+            data["rainfall"] = 0.0  # TraCI does not expose rainfall
+
     async def _run_simulation_loop(self, simulation_id: str) -> None:
         """
-        Main simulation tick loop.
+        Main simulation tick loop — SUMO-backend bridge pipeline.
 
-        Structured to yield control back to the event loop via
-        ``await asyncio.sleep(1)`` at the **end** of every iteration, ensuring
-        FastAPI can serve HTTP/WebSocket requests between ticks.
+        See module docstring for the full pipeline description.
         """
         graph: RoadNetworkGraph = get_road_network_graph()
         adapter: TrafficModelAdapter = get_model_adapter()
         config: SimulationConfig = self._configs[simulation_id]
+        loop = asyncio.get_event_loop()
+
+        # Resolve the V15 engine: prefer the injected engine, fall back to
+        # the module-level adapter so tests/dev still work without main.py.
+        ml_engine = self._ml_engine
+
+        # Resolve SumoBridge (may be None if SUMO not available).
+        bridge = self._sumo_bridge
 
         logger.info("Simulation %s: tick loop started.", simulation_id)
+        if bridge is not None and bridge.is_connected:
+            logger.info(
+                "Simulation %s: SUMO bridge ACTIVE — "
+                "TraCI thread pinned to executor 'sumo-traci' (max_workers=1).",
+                simulation_id,
+            )
+        else:
+            logger.info(
+                "Simulation %s: SUMO bridge NOT connected — mock sensor mode.",
+                simulation_id,
+            )
 
         try:
             while True:
                 tick = self._tick_counts[simulation_id]
+                sumo_active = bridge is not None and bridge.is_connected
+                data_source = "sumo" if sumo_active else "mock"
 
-                # 1. Inject fresh mock sensor data into the graph edges.
-                self._mutate_edge_sensor_data(graph, config)
+                # ── Step 1: SUMO step + metric collection ────────────────────
+                #
+                # CRITICAL — Thread-affinity fix:
+                #   We submit to bridge.executor (max_workers=1), NOT None.
+                #   This guarantees that the same OS thread steps SUMO every
+                #   tick, satisfying TraCI's thread-affinity requirement.
+                #   Using run_in_executor(None, ...) would allow the default
+                #   thread pool to dispatch consecutive ticks to different
+                #   threads, causing TraCI socket/connection errors.
+                #
+                if sumo_active:
+                    sumo_step_func = functools.partial(bridge.simulation_step_and_collect)
+                    raw_metrics: list[Dict[str, Any]] = await loop.run_in_executor(
+                        bridge.executor,   # ← dedicated 1-worker pool (max_workers=1)
+                        sumo_step_func,    # ← sync: step + collect in one thread call
+                    )
+                    if raw_metrics:
+                        # Verification plan stop condition — must appear per tick.
+                        logger.info(
+                            "Simulation %s: SUMO tick OK — collected %d edges from TraCI",
+                            simulation_id,
+                            len(raw_metrics),
+                        )
+                    else:
+                        # Bridge marked itself disconnected after an error.
+                        logger.warning(
+                            "Simulation %s tick=%d: SUMO returned no data — "
+                            "falling back to mock sensor.",
+                            simulation_id,
+                            tick,
+                        )
+                        sumo_active = False
+                        data_source = "mock"
+                else:
+                    raw_metrics = []
 
-                # 2. Get congestion predictions from the ML adapter (or heuristic fallback).
+                # ── Step 2: Push data into the routing graph ─────────────────
+                if sumo_active and raw_metrics:
+                    self._apply_sumo_metrics_to_graph(graph, raw_metrics)
+                else:
+                    logger.info(
+                        "Simulation %s: SUMO not connected -- using mock sensor data.",
+                        simulation_id,
+                    )
+                    self._mutate_edge_sensor_data(graph, config)
+
+                # ── Step 3a: Legacy congestion adapter (graph-edge features) ─
                 edge_rows = graph.get_edge_feature_rows()
                 predictions: Dict[str, float] = adapter.predict_congestion(edge_rows)
 
-                # 3. Apply predictions back to the graph's live weights.
+                # ── Step 3b: V15 XGBoost risk scores ─────────────────────────
+                #
+                # SUMO path: SumoBridge.build_v15_raw_features() maps each
+                # raw TraCI metric dict to the full 53-column V15 contract
+                # (lag-1/2/3, momentum, escalation rates, composites), then
+                # ml_engine.predict_batch() runs a single batched XGBoost
+                # inference call — no per-edge predict() loop overhead.
+                #
+                # Mock path: falls through to the model_registry / heuristic.
+                #
+                risk_scores: Dict[str, float] = {}
+
+                if sumo_active and raw_metrics and ml_engine is not None and ml_engine.is_ready:
+                    v15_rows = []
+                    edge_id_order = []
+                    for m in raw_metrics:
+                        eid = m["edge_id"]
+                        v15_raw = bridge.build_v15_raw_features(eid, m)
+                        v15_rows.append(v15_raw)
+                        edge_id_order.append(eid)
+
+                    probs = ml_engine.predict_batch(v15_rows)
+                    risk_scores = {eid: p for eid, p in zip(edge_id_order, probs)}
+                    logger.info(
+                        "Simulation %s tick=%d: V15 batch predict -- %d edges, "
+                        "max_risk=%.4f  [source=sumo]",
+                        simulation_id,
+                        tick,
+                        len(risk_scores),
+                        max(risk_scores.values(), default=0.0),
+                    )
+                else:
+                    v16_model = model_registry.load("v16_risk")
+                    risk_scores = predict_v16_risk(edge_rows, model=v16_model)
+
+                # ── Step 4: Apply predictions → dynamic edge costs ───────────
                 updated_count = graph.update_edge_weights(predictions)
 
-                # 4. Build a representative broadcast payload (first few edges as sample).
-                sample_rows = edge_rows[:5]  # broadcast a sample; full data is in the graph
+                # ── Step 5: Build and broadcast JSON payload ─────────────────
                 traffic_events: list[Dict[str, Any]] = []
-                for row in sample_rows:
-                    edge_id: str = str(row.get("edge_id", "unknown"))
-                    congestion_score = predictions.get(edge_id, 0.0)
+                for u, v, data in graph.graph.edges(data=True):
+                    edge_id: str = str(data.get("edge_id", f"{u}->{v}"))
+                    congestion_score = predictions.get(
+                        edge_id, float(data.get("congestion", 0.0) or 0.0)
+                    )
                     traffic_events.append(
                         {
                             "type": UpdateType.TRAFFIC.value,
                             "edge_id": edge_id,
-                            "speed": round(float(row.get("avg_speed", 40.0)), 1),
-                            "vehicle_count": int(row.get("vehicle_count", 0)),
+                            "speed": round(float(data.get("avg_speed", 40.0)), 1),
+                            "vehicle_count": int(data.get("vehicle_count", 0)),
                             "congestion": _congestion_label(congestion_score),
                             "congestion_score": round(congestion_score, 4),
+                            "edge_cost": round(float(data.get("weight", 0.0) or 0.0), 4),
+                            "base_cost": round(float(data.get("base_weight", 0.0) or 0.0), 4),
+                            "risk_score": round(
+                                float(risk_scores.get(edge_id, congestion_score)), 4
+                            ),
+                            "model": "v15_xgboost" if sumo_active else "v16_xgboost",
+                            "source": data_source,
                         }
                     )
 
@@ -206,37 +395,36 @@ class SimulationManager:
                     "status": SimulationStatus.RUNNING.value,
                     "tick": tick,
                     "edges_updated": updated_count,
+                    "model": "v15_xgboost" if sumo_active else "v16_xgboost",
+                    "source": data_source,
                     "traffic": traffic_events,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
-                # 5. Fan-out to all subscribed WebSocket clients for this simulation.
                 await websocket_manager.broadcast(simulation_id, payload)
 
-                logger.debug(
-                    "Simulation %s tick=%d  edges_updated=%d  ws_clients=%d",
+                logger.info(
+                    "Simulation %s tick=%d  edges_updated=%d  ws_clients=%d  "
+                    "source=%s  [BROADCAST SENT]",
                     simulation_id,
                     tick,
                     updated_count,
                     websocket_manager.connection_count(simulation_id),
+                    data_source,
                 )
 
                 self._tick_counts[simulation_id] = tick + 1
 
-                # ---------------------------------------------------------------
-                # IMPORTANT: yield control back to the FastAPI event loop so that
-                # HTTP requests are not starved between simulation ticks.
-                # ---------------------------------------------------------------
+                # Yield control back to the FastAPI event loop.
                 await asyncio.sleep(1)
 
         except asyncio.CancelledError:
-            # Normal shutdown path — log and exit cleanly.
             logger.info(
                 "Simulation %s: tick loop cancelled at tick %d.",
                 simulation_id,
                 self._tick_counts.get(simulation_id, 0),
             )
-            raise  # Re-raise so asyncio marks the task as properly cancelled.
+            raise
 
         except Exception as exc:  # noqa: BLE001
             logger.error(

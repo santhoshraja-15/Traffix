@@ -27,7 +27,6 @@ export function TraffixProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const client = getWebSocketClient();
-    client.connect();
 
     const unsubStatus = client.on<{ connected: boolean; mock?: boolean }>(
       "connection_status",

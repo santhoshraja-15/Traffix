@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Header from "@/components/common/Header";
 import LocationSearch from "@/components/navigation/LocationSearch";
 import NavigationBar from "@/components/navigation/NavigationBar";
@@ -25,6 +25,7 @@ import { MOCK_ROUTES, MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
 import { calculateRoutes } from "@/services/navigationApi";
 import { simulateAccident } from "@/services/accidentApi";
 import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
+import { useSimulationStream } from "@/hooks/useSimulationStream";
 import { CheckCircle2, ShieldAlert } from "lucide-react";
 
 export default function HomePage() {
@@ -38,11 +39,28 @@ export default function HomePage() {
   const [ambulance, setAmbulance] = useState<Ambulance | null>(null);
   const [showComparison, setShowComparison] = useState(false);
 
+  const [mapReady, setMapReady] = useState(false);
+
   // ── Phase 15: Live KPI from WebSocket + REST polling ────────────────────
-  const { kpi, wsConnected, wsStep, isMockFeed, setKpi } = useLiveKpi(5000);
+  const { kpi, wsConnected, wsStep, isMockFeed, setKpi } = useLiveKpi(5000, mapReady);
+
+  // ── Phase 2: FastAPI simulation stream (starts only after baseline map) ─
+  const { connected: simConnected, riskByEdge, tick: simTick } = useSimulationStream(mapReady);
 
   // ── Phase 15: Live intelligence message feed ─────────────────────────────
   const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
+
+  useEffect(() => {
+    if (!mapReady) return;
+    fetch("http://localhost:8000/health")
+      .then((res) => res.json())
+      .then((data) => {
+        console.log("[TRAFFIX] /health", data);
+      })
+      .catch(() => {
+        console.log("[TRAFFIX] /health not reachable yet");
+      });
+  }, [mapReady]);
 
   // ── Phase 4: Route Optimization Workflow ─────────────────────────────────
   const handleSearch = async (origin: string, destination: string) => {
@@ -145,7 +163,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} systemConnected={wsConnected} />
+      <Header mode={mode} onModeChange={setMode} systemConnected={simConnected || wsConnected} />
 
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 flex flex-col gap-3 relative">
 
@@ -160,19 +178,19 @@ export default function HomePage() {
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <WsStatusBadge
-              connected={wsConnected}
-              mock={isMockFeed}
-              step={wsStep}
+              connected={simConnected || wsConnected}
+              mock={isMockFeed && !simConnected}
+              step={simTick ?? wsStep}
             />
-            {wsConnected && (
+            {simConnected && (
               <span className="text-[10px] font-semibold text-slate-400">
-                Live data active — KPIs updating in real-time
+                FastAPI simulation stream — map colors throttled to 1s
               </span>
             )}
           </div>
-          {wsStep !== undefined && (
+          {simTick !== undefined && (
             <span className="text-[10px] font-bold text-slate-400 tabular-nums">
-              SUMO Step: {wsStep.toLocaleString()}
+              Sim tick: {simTick.toLocaleString()}
             </span>
           )}
         </div>
@@ -231,7 +249,7 @@ export default function HomePage() {
 
           {/* LEFT: Map View & Journey Metrics */}
           <div className="lg:col-span-8 flex flex-col gap-2 h-full">
-            <NavigationBar areaName="Anna Salai Corridor" />
+            <NavigationBar areaName="Anna Nagar, Chennai" />
 
             <div className="h-[520px] w-full relative shadow-sm rounded-b-xl">
               <TrafficMap
@@ -239,6 +257,8 @@ export default function HomePage() {
                 accident={accident}
                 ambulance={ambulance}
                 isNavigating={true}
+                riskByEdge={riskByEdge}
+                onBaselineReady={() => setMapReady(true)}
               />
             </div>
 
