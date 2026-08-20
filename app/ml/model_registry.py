@@ -18,6 +18,7 @@ ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 
 _KNOWN_MODELS: Dict[str, str] = {
     "congestion": "congestion_model.joblib",
+    "v16_risk": "v16_model.pkl",
 }
 
 

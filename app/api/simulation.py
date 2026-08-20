@@ -33,7 +33,7 @@ async def start_simulation(request: SimulationStartRequest) -> SimulationStartRe
     (which ticks every 1 second), and returns the new simulation_id immediately.
     The background loop runs independently — the HTTP response is not blocked.
     """
-    simulation_id = str(uuid.uuid4())
+    simulation_id = request.simulation_id or str(uuid.uuid4())
 
     # Persist a status record so /status/{id} can serve it.
     _MOCK_SIMULATIONS[simulation_id] = SimulationStatusResponse(

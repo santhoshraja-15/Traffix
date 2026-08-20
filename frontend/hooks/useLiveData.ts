@@ -5,7 +5,7 @@ import { getWebSocketClient } from "../services/webSocketClient";
 import { fetchNetworkKpi, NetworkKpi } from "../services/trafficApi";
 
 // ── Live KPI hook — merges REST baseline + WS delta updates ──────────────────
-export function useLiveKpi(pollingIntervalMs = 5000) {
+export function useLiveKpi(pollingIntervalMs = 5000, enabled = true) {
   const [kpi, setKpi] = useState<NetworkKpi>({
     activeVehicles: 1247,
     avgSpeedKmh: 34.2,
@@ -20,21 +20,22 @@ export function useLiveKpi(pollingIntervalMs = 5000) {
 
   // Initial REST fetch
   useEffect(() => {
+    if (!enabled) return;
     fetchNetworkKpi().then(setKpi).catch(() => {/* use default */});
-  }, []);
+  }, [enabled]);
 
   // Polling REST fallback
   useEffect(() => {
+    if (!enabled) return;
     const interval = setInterval(() => {
       fetchNetworkKpi().then(setKpi).catch(() => {/* keep last */});
     }, pollingIntervalMs);
     return () => clearInterval(interval);
-  }, [pollingIntervalMs]);
+  }, [pollingIntervalMs, enabled]);
 
-  // WebSocket live updates
+  // Legacy TraCI client is unused during the FastAPI simulation stream (Phase 2).
   useEffect(() => {
     const client = getWebSocketClient();
-    client.connect();
 
     const unsubStatus = client.on<{ connected: boolean; mock?: boolean }>(
       "connection_status",

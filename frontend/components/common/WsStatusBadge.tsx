@@ -26,7 +26,7 @@ export default function WsStatusBadge({ connected, mock, step }: WsStatusBadgePr
         <Wifi className="w-3 h-3 text-emerald-500" />
       )}
       <span className="hidden sm:inline">
-        {mock ? "Mock Feed" : "Live TraCI"}
+        {mock ? "Mock Feed" : "Live simulation"}
       </span>
       {step !== undefined && (
         <span className="ml-1 font-mono text-[10px] text-emerald-600 tabular-nums">

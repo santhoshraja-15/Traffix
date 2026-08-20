@@ -1,13 +1,16 @@
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
-export const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/ws";
+export const API_ORIGIN = process.env.NEXT_PUBLIC_API_ORIGIN || "http://localhost:8000";
+export const WS_BASE_URL = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000/api";
 export const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAP_TOKEN || "";
 export const API_TIMEOUT_MS = 8000;
 export const API_MAX_RETRIES = 2;
 
-// Default center: Chennai Anna Salai Corridor
+export const DEMO_SIMULATION_ID = "anna-nagar-live";
+
+// Default center: Anna Nagar, Chennai
 export const DEFAULT_MAP_CENTER = {
-  lat: 13.0482,
-  lng: 80.2425,
+  lat: 13.0850,
+  lng: 80.2101,
 };
 
 export const DEFAULT_MAP_ZOOM = 14;
