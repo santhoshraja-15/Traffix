@@ -1,13 +1,24 @@
-fastapi
-uvicorn[standard]
-pydantic
-websockets
-networkx
-numpy
-pandas
-scikit-learn
-xgboost
-traci
-sumolib
-joblib
-requests
+# TRAFFICX Backend – Python dependencies
+# Install with: pip install -r requirements.txt
+
+# --- Core web framework ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# --- Data validation ---
+pydantic>=2.7.0
+
+# --- Graph algorithms (routing engine) ---
+networkx>=3.3
+
+# --- Data science / ML ---
+pandas>=2.2.0
+numpy>=1.26.0
+xgboost>=2.0.0
+joblib>=1.4.0
+
+# --- Async WebSocket support ---
+websockets>=12.0
+
+# --- Multipart form support (FastAPI uploads) ---
+python-multipart>=0.0.9
