@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+cache/
+node_modules/
+.next/
+*.log
+
+*.csv
+*.pkl
+*.pt
+*.onnx
+models/

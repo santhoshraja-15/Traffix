@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+websockets
+networkx
+numpy
+pandas
+scikit-learn
+xgboost
+traci
+sumolib
+joblib
+requests
