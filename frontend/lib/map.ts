@@ -8,7 +8,7 @@ export interface GeoBounds {
 export interface NetworkTopology {
   type: "FeatureCollection";
   name?: string;
-  bbox?: number[];
+  bbox?: [number, number, number, number];
   metadata?: { area?: string; nodes?: number; edges?: number };
   features: TopologyFeature[];
 }

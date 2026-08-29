@@ -8,6 +8,7 @@ import { RouteOption } from "@/types/route";
 import { Accident } from "@/types/accident";
 import { Ambulance } from "@/types/ambulance";
 import { TrafficStateSnapshot } from "@/types/traffic";
+import type { FeatureCollection } from "geojson";
 import { boundsFromTopology, NetworkTopology, projectToViewBox, riskToColor } from "@/lib/map";
 import { ANNA_NAGAR_TOPOLOGY } from "@/lib/annaNagarTopology";
 import { EdgeRiskMap } from "@/hooks/useSimulationStream";
@@ -202,7 +203,7 @@ export default function TrafficMap({
         },
       })),
     };
-    source.setData(colored as GeoJSON.FeatureCollection);
+    source.setData(colored as FeatureCollection);
 
     if (map.current?.getLayer(TOPOLOGY_LAYER)) {
       map.current.setPaintProperty(TOPOLOGY_LAYER, "line-color", [
