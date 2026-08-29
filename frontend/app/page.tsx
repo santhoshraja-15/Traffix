@@ -25,7 +25,8 @@ import { MOCK_ROUTES, MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
 import { calculateRoutes } from "@/services/navigationApi";
 import { simulateAccident } from "@/services/accidentApi";
 import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
-import { useSimulationStream } from "@/hooks/useSimulationStream";
+import { useTraffixContext } from "@/context/TraffixContext";
+import { API_ORIGIN } from "@/lib/constants";
 import { CheckCircle2, ShieldAlert } from "lucide-react";
 
 export default function HomePage() {
@@ -41,18 +42,18 @@ export default function HomePage() {
 
   const [mapReady, setMapReady] = useState(false);
 
-  // ── Phase 15: Live KPI from WebSocket + REST polling ────────────────────
-  const { kpi, wsConnected, wsStep, isMockFeed, setKpi } = useLiveKpi(5000, mapReady);
+  // ── Live KPI: REST baseline + polling ─────────────────────────────────────
+  const { kpi, setKpi } = useLiveKpi(5000, mapReady);
 
-  // ── Phase 2: FastAPI simulation stream (starts only after baseline map) ─
-  const { connected: simConnected, riskByEdge, tick: simTick } = useSimulationStream(mapReady);
+  // ── The one app-wide WebSocket connection, owned by TraffixProvider ──────
+  const { wsConnected, wsStep, riskByEdge } = useTraffixContext();
 
-  // ── Phase 15: Live intelligence message feed ─────────────────────────────
+  // ── Live intelligence message feed ────────────────────────────────────────
   const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
 
   useEffect(() => {
     if (!mapReady) return;
-    fetch("http://localhost:8000/health")
+    fetch(`${API_ORIGIN}/health`)
       .then((res) => res.json())
       .then((data) => {
         console.log("[TRAFFIX] /health", data);
@@ -163,7 +164,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} systemConnected={simConnected || wsConnected} />
+      <Header mode={mode} onModeChange={setMode} systemConnected={wsConnected} />
 
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 flex flex-col gap-3 relative">
 
@@ -174,25 +175,19 @@ export default function HomePage() {
           />
         )}
 
-        {/* Phase 15: WS status bar */}
+        {/* WS status bar — reflects the one real app-wide connection */}
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
-            <WsStatusBadge
-              connected={simConnected || wsConnected}
-              mock={isMockFeed && !simConnected}
-              step={simTick ?? wsStep}
-            />
-            {simConnected && (
+            <WsStatusBadge connected={wsConnected} step={wsStep} />
+            {wsConnected && (
               <span className="text-[10px] font-semibold text-slate-400">
                 FastAPI simulation stream — map colors throttled to 1s
               </span>
             )}
           </div>
-          {simTick !== undefined && (
-            <span className="text-[10px] font-bold text-slate-400 tabular-nums">
-              Sim tick: {simTick.toLocaleString()}
-            </span>
-          )}
+          <span className="text-[10px] font-bold text-slate-400 tabular-nums">
+            Sim tick: {wsStep.toLocaleString()}
+          </span>
         </div>
 
         {/* Phase 2: Traffic KPI — now driven by live useLiveKpi */}

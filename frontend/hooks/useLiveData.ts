@@ -1,10 +1,15 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { getWebSocketClient } from "../services/webSocketClient";
 import { fetchNetworkKpi, NetworkKpi } from "../services/trafficApi";
 
-// ── Live KPI hook — merges REST baseline + WS delta updates ──────────────────
+// ── Live KPI hook — REST baseline + polling ───────────────────────────────────
+// Previously also merged in delta updates from services/webSocketClient.ts, a
+// second WebSocket client that connected to a nonexistent endpoint and
+// silently fabricated data when it failed. That client has been retired
+// (see TraffixContext.tsx) — this hook is now honestly what it does: a
+// polled REST fetch. Live per-edge data flows through the real socket via
+// useTraffixContext()/useSimulationStream instead.
 export function useLiveKpi(pollingIntervalMs = 5000, enabled = true) {
   const [kpi, setKpi] = useState<NetworkKpi>({
     activeVehicles: 1247,
@@ -14,9 +19,6 @@ export function useLiveKpi(pollingIntervalMs = 5000, enabled = true) {
     throughputVehPerHr: 1820,
     congestionIndex: 0.62,
   });
-  const [wsConnected, setWsConnected] = useState(false);
-  const [wsStep, setWsStep] = useState<number | undefined>(undefined);
-  const [isMockFeed, setIsMockFeed] = useState(false);
 
   // Initial REST fetch
   useEffect(() => {
@@ -33,93 +35,19 @@ export function useLiveKpi(pollingIntervalMs = 5000, enabled = true) {
     return () => clearInterval(interval);
   }, [pollingIntervalMs, enabled]);
 
-  // Legacy TraCI client is unused during the FastAPI simulation stream (Phase 2).
-  useEffect(() => {
-    const client = getWebSocketClient();
-
-    const unsubStatus = client.on<{ connected: boolean; mock?: boolean }>(
-      "connection_status",
-      (msg) => {
-        setWsConnected(msg.payload.connected);
-        setIsMockFeed(!!msg.payload.mock);
-      }
-    );
-
-    const unsubStep = client.on<{ step: number; vehicleCount: number }>(
-      "simulation_step",
-      (msg) => {
-        setWsStep(msg.payload.step);
-        setKpi((prev) => ({
-          ...prev,
-          activeVehicles: msg.payload.vehicleCount,
-        }));
-      }
-    );
-
-    const unsubTraffic = client.on<{
-      roadId: string;
-      density: number;
-      avgSpeed: number;
-    }>("traffic_update", (msg) => {
-      setKpi((prev) => ({
-        ...prev,
-        avgSpeedKmh: parseFloat(
-          ((prev.avgSpeedKmh * 0.8 + msg.payload.avgSpeed * 0.2)).toFixed(1)
-        ),
-        congestionIndex: parseFloat(
-          (msg.payload.density / 100).toFixed(2)
-        ),
-        networkHealthPct: Math.max(
-          50,
-          Math.round(100 - msg.payload.density * 0.5)
-        ),
-      }));
-    });
-
-    setWsConnected(client.isConnected);
-
-    return () => {
-      unsubStatus();
-      unsubStep();
-      unsubTraffic();
-    };
-  }, []);
-
-  return { kpi, wsConnected, wsStep, isMockFeed, setKpi };
+  return { kpi, setKpi };
 }
 
-// ── Live message feed hook — appends WS system_alert events ──────────────────
+// ── Live message feed hook ────────────────────────────────────────────────────
+// Previously also subscribed to a fabricated "system_alert" WS event from the
+// retired legacy client. The backend doesn't broadcast any alert/event stream
+// today (see FRONTEND_AUDIT.md §1.2) — messages are pushed explicitly by
+// real client-side events (e.g. route search, accident simulation) via
+// pushMessage() until a real backend event stream exists to wire up here.
 import { IntelligenceMessage } from "../types/common";
 
 export function useLiveMessages(initial: IntelligenceMessage[]) {
   const [messages, setMessages] = useState<IntelligenceMessage[]>(initial);
-
-  useEffect(() => {
-    const client = getWebSocketClient();
-
-    const unsub = client.on<{
-      severity: string;
-      text: string;
-      details?: string;
-    }>("system_alert", (msg) => {
-      const newMsg: IntelligenceMessage = {
-        id: `ws-${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type:
-          msg.payload.severity === "critical"
-            ? "emergency"
-            : msg.payload.severity === "warning"
-            ? "warning"
-            : "info",
-        text: msg.payload.text,
-        details: msg.payload.details,
-        urgent: msg.payload.severity === "critical",
-      };
-      setMessages((prev) => [newMsg, ...prev].slice(0, 50));
-    });
-
-    return () => unsub();
-  }, []);
 
   const pushMessage = useCallback((msg: IntelligenceMessage) => {
     setMessages((prev) => [msg, ...prev].slice(0, 50));

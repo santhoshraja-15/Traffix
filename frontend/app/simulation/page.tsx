@@ -29,8 +29,8 @@ export default function SimulationPage() {
   const [currentStep, setCurrentStep] = useState(420);
   const [stopped, setStopped] = useState(false);
 
-  // Phase 16: shared WS context
-  const { wsConnected, wsStep, isMockFeed } = useTraffixContext();
+  // Shared app-wide WS context (single real connection, see TraffixContext.tsx)
+  const { wsConnected, wsStep } = useTraffixContext();
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -118,7 +118,7 @@ export default function SimulationPage() {
 
           {/* Status badges */}
           <div className="flex items-center gap-2 flex-wrap">
-            <WsStatusBadge connected={wsConnected} mock={isMockFeed} step={wsStep} />
+            <WsStatusBadge connected={wsConnected} step={wsStep} />
             <div
               className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-xs font-extrabold ${
                 stopped
