@@ -5,6 +5,7 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM, DEFAULT_MAP_PITCH, MAPBOX_TOKEN } from "@/lib/constants";
 import { RouteOption, LocationSuggestion } from "@/types/route";
+import { GeoCoordinates } from "@/types/common";
 import type { FeatureCollection } from "geojson";
 import {
   boundsFromTopology,
@@ -33,8 +34,9 @@ import AccidentZone from "./AccidentZone";
 import RippleEffect from "./RippleEffect";
 import AmbulanceLayer from "./AmbulanceLayer";
 import HospitalLayer from "./HospitalLayer";
+import JourneyVehicleMarker from "./JourneyVehicleMarker";
 
-import { Layers } from "lucide-react";
+import { Layers, Flag } from "lucide-react";
 
 const SVG_W = 1000;
 const SVG_H = 720;
@@ -66,6 +68,28 @@ const AMBULANCE_SOURCE = "active-ambulances";
 const AMBULANCE_LAYER = "active-ambulances-dots";
 const HOSPITALS_SOURCE = "real-hospitals";
 const HOSPITALS_LAYER = "real-hospitals-dots";
+const JOURNEY_TRAVELED_SOURCE = "journey-traveled";
+const JOURNEY_TRAVELED_LAYER = "journey-traveled-line";
+const JOURNEY_REMAINING_SOURCE = "journey-remaining";
+const JOURNEY_REMAINING_LAYER = "journey-remaining-line";
+// The traveled portion reuses the route's own blue but solid/bold; the
+// remaining portion is dimmed so the covered path reads as "done" without
+// a second unrelated color competing with the risk/route/corridor palette.
+const JOURNEY_TRAVELED_COLOR = "#0284c7";
+const JOURNEY_REMAINING_COLOR = "#7dd3fc";
+const JOURNEY_VEHICLE_SOURCE = "journey-vehicle";
+const JOURNEY_VEHICLE_LAYER = "journey-vehicle-dot";
+
+/** Real active-journey vehicle state from hooks/useJourneySimulation —
+ * derived from the route's own real geometry, real elapsed time, and real
+ * live per-edge traffic. Never a second routing/simulation engine. */
+export interface JourneyVehicleState {
+  position: GeoCoordinates | null;
+  headingDeg: number;
+  traveled: GeoCoordinates[];
+  remaining: GeoCoordinates[];
+  arrived: boolean;
+}
 
 interface TrafficMapProps {
   activeRoute?: RouteOption;
@@ -81,6 +105,10 @@ interface TrafficMapProps {
    * empty whenever SUMO isn't connected (see FRONTEND_AUDIT.md §1.2). This
    * component smooths motion between updates but never invents a vehicle. */
   vehicles?: StreamVehicle[];
+  /** Present only while an active-navigation journey is running — see
+   * app/page.tsx. Drives the journey vehicle marker, the traveled/
+   * remaining route split, and camera-follow below. */
+  journeyVehicle?: JourneyVehicleState;
   onBaselineReady?: () => void;
 }
 
@@ -219,6 +247,34 @@ function vehiclesToGeoJSON(vehicles: ReturnType<typeof useVehicleInterpolation>)
   };
 }
 
+function coordsToLineGeoJSON(coords: GeoCoordinates[]): FeatureCollection {
+  if (coords.length < 2) return { type: "FeatureCollection", features: [] };
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: {},
+        geometry: { type: "LineString", coordinates: coords.map((c) => [c.lng, c.lat]) },
+      },
+    ],
+  };
+}
+
+function journeyVehiclePointGeoJSON(vehicle: JourneyVehicleState | undefined): FeatureCollection {
+  if (!vehicle?.position) return { type: "FeatureCollection", features: [] };
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { heading: vehicle.headingDeg, arrived: vehicle.arrived },
+        geometry: { type: "Point", coordinates: [vehicle.position.lng, vehicle.position.lat] },
+      },
+    ],
+  };
+}
+
 export default function TrafficMap({
   activeRoute,
   accidents = [],
@@ -226,6 +282,7 @@ export default function TrafficMap({
   isNavigating = false,
   riskByEdge = {},
   vehicles = [],
+  journeyVehicle,
   onBaselineReady,
 }: TrafficMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
@@ -256,6 +313,20 @@ export default function TrafficMap({
   // fit it into view exactly once, then leave the user's own subsequent
   // pan/zoom alone (never fight manual camera control on every re-render).
   const lastFitRouteId = useRef<string | undefined>(undefined);
+
+  // ── Active-journey camera follow ──────────────────────────────────────
+  // Engaged automatically once a journeyVehicle position exists; disengaged
+  // the instant the user manually drags/zooms/double-clicks (the SAME
+  // native handlers already built for general map interaction — see the
+  // interaction useEffect below), matching "respect the user's manual
+  // pan/zoom, provide a working recenter." A React state (not just a ref)
+  // so the HUD's Recenter button can reflect whether it's currently needed.
+  const [autoFollow, setAutoFollow] = useState(true);
+  const autoFollowRef = useRef(true);
+  autoFollowRef.current = autoFollow;
+  const journeyVehicleRef = useRef<JourneyVehicleState | undefined>(journeyVehicle);
+  journeyVehicleRef.current = journeyVehicle;
+  const lastFollowedJourneyKey = useRef<string | undefined>(undefined);
 
   // Real, continuously-interpolated vehicle positions (ANIMATED_EFFECTS.md §2).
   const interpolatedVehicles = useVehicleInterpolation(vehicles);
@@ -425,8 +496,16 @@ export default function TrafficMap({
     const isMapUiTarget = (target: EventTarget | null): boolean =>
       target instanceof Element && target.closest("[data-map-ui]") !== null;
 
+    // Any real manual pan/zoom/double-click disengages journey camera-
+    // follow — "if the user manually pans/zooms, respect their
+    // interaction" — until they explicitly click Recenter.
+    const disengageFollow = () => {
+      if (autoFollowRef.current) setAutoFollow(false);
+    };
+
     const onWheel = (e: WheelEvent) => {
       if (isMapUiTarget(e.target)) return;
+      disengageFollow();
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const mx = e.clientX - rect.left;
@@ -446,6 +525,7 @@ export default function TrafficMap({
 
     const onPointerDown = (e: PointerEvent) => {
       if (isMapUiTarget(e.target)) return;
+      disengageFollow();
       activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (activePointers.size === 1) {
         const cam = cameraRef.current;
@@ -507,6 +587,7 @@ export default function TrafficMap({
 
     const onDoubleClick = (e: MouseEvent) => {
       if (isMapUiTarget(e.target)) return;
+      disengageFollow();
       const rect = el.getBoundingClientRect();
       zoomAt(e.clientX - rect.left, e.clientY - rect.top, 1.6);
     };
@@ -537,6 +618,52 @@ export default function TrafficMap({
     if (!cam) return;
     setCamera({ ...cam, scale: clampScale(cam.scale * factor) });
   };
+
+  const handleRecenterOnVehicle = () => {
+    setAutoFollow(true);
+    const jv = journeyVehicleRef.current;
+    const cam = cameraRef.current;
+    if (jv?.position && cam) {
+      setCamera({ lng: jv.position.lng, lat: jv.position.lat, scale: Math.max(cam.scale, 4) });
+    } else if (jv?.position) {
+      setCamera({ lng: jv.position.lng, lat: jv.position.lat, scale: 4 });
+    }
+    if (hasToken && map.current && jv?.position) {
+      map.current.easeTo({ center: [jv.position.lng, jv.position.lat], zoom: Math.max(map.current.getZoom(), 16) });
+    }
+  };
+
+  // A new journey (or the very first vehicle position of one) re-engages
+  // auto-follow even if a PREVIOUS journey had it disengaged — each fresh
+  // "Start Journey" deserves to start followed.
+  useEffect(() => {
+    const key = journeyVehicle && !journeyVehicle.arrived ? "active" : undefined;
+    if (key && key !== lastFollowedJourneyKey.current) {
+      lastFollowedJourneyKey.current = key;
+      setAutoFollow(true);
+    }
+    if (!key) lastFollowedJourneyKey.current = undefined;
+  }, [journeyVehicle]);
+
+  // Smoothly follow the real journey vehicle position while auto-follow is
+  // engaged — never fights a manual pan/zoom (disengageFollow above stops
+  // this the instant the user touches the map), and never resets zoom on
+  // every tick (only recentering; zoom stays whatever fit-to-route or the
+  // user last set). Small per-tick position deltas (~400ms cadence, a few
+  // meters at a time) already read as smooth without an added lerp layer.
+  useEffect(() => {
+    if (!autoFollow || !journeyVehicle?.position) return;
+    if (hasToken && map.current) {
+      map.current.easeTo({ center: [journeyVehicle.position.lng, journeyVehicle.position.lat], duration: 350 });
+      return;
+    }
+    setCamera((prev) =>
+      prev
+        ? { ...prev, lng: journeyVehicle.position!.lng, lat: journeyVehicle.position!.lat }
+        : { lng: journeyVehicle.position!.lng, lat: journeyVehicle.position!.lat, scale: 4 }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [journeyVehicle?.position, autoFollow, hasToken]);
 
   // Load the REAL Anna Nagar network from the backend (app/routing/graph_manager.py,
   // now built from the actual SUMO net file — see FRONTEND_AUDIT.md §1.3). No
@@ -653,6 +780,53 @@ export default function TrafficMap({
                 "line-width": 5,
                 "line-color": ROUTE_COLOR,
                 "line-opacity": 0.95,
+              },
+            });
+          }
+
+          // Active-journey traveled/remaining split (see
+          // hooks/useJourneySimulation.ts) — drawn on top of ROUTE_LAYER so
+          // the covered portion visibly overrides the plain route color.
+          if (!map.current.getSource(JOURNEY_REMAINING_SOURCE)) {
+            map.current.addSource(JOURNEY_REMAINING_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: JOURNEY_REMAINING_LAYER,
+              type: "line",
+              source: JOURNEY_REMAINING_SOURCE,
+              layout: { "line-cap": "round", "line-join": "round" },
+              paint: { "line-width": 5, "line-color": JOURNEY_REMAINING_COLOR, "line-opacity": 0.95 },
+            });
+          }
+          if (!map.current.getSource(JOURNEY_TRAVELED_SOURCE)) {
+            map.current.addSource(JOURNEY_TRAVELED_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: JOURNEY_TRAVELED_LAYER,
+              type: "line",
+              source: JOURNEY_TRAVELED_SOURCE,
+              layout: { "line-cap": "round", "line-join": "round" },
+              paint: { "line-width": 5, "line-color": JOURNEY_TRAVELED_COLOR, "line-opacity": 1 },
+            });
+          }
+          if (!map.current.getSource(JOURNEY_VEHICLE_SOURCE)) {
+            map.current.addSource(JOURNEY_VEHICLE_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: JOURNEY_VEHICLE_LAYER,
+              type: "circle",
+              source: JOURNEY_VEHICLE_SOURCE,
+              paint: {
+                "circle-radius": 7,
+                "circle-color": "#0ea5e9",
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff",
               },
             });
           }
@@ -833,6 +1007,19 @@ export default function TrafficMap({
     source.setData(routeToGeoJSON(activeRoute));
   }, [activeRoute]);
 
+  // Real active-journey vehicle position + traveled/remaining route split
+  // (see hooks/useJourneySimulation.ts) — driven straight into the Mapbox
+  // sources each tick, same "don't rerender a large tree per tick"
+  // reasoning as the live-vehicles effect above.
+  useEffect(() => {
+    const traveledSource = map.current?.getSource(JOURNEY_TRAVELED_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    const remainingSource = map.current?.getSource(JOURNEY_REMAINING_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    const vehicleSource = map.current?.getSource(JOURNEY_VEHICLE_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    if (traveledSource) traveledSource.setData(coordsToLineGeoJSON(journeyVehicle?.traveled ?? []));
+    if (remainingSource) remainingSource.setData(coordsToLineGeoJSON(journeyVehicle?.remaining ?? []));
+    if (vehicleSource) vehicleSource.setData(journeyVehiclePointGeoJSON(journeyVehicle));
+  }, [journeyVehicle]);
+
   // Real, currently-active accidents — see app/services/accident_service.py.
   useEffect(() => {
     const source = map.current?.getSource(ACCIDENTS_SOURCE) as mapboxgl.GeoJSONSource | undefined;
@@ -890,6 +1077,9 @@ export default function TrafficMap({
         showBuildingsToggle={hasToken}
         onZoomIn={!hasToken ? () => handleZoomButton(1.5) : undefined}
         onZoomOut={!hasToken ? () => handleZoomButton(1 / 1.5) : undefined}
+        onRecenterVehicle={
+          journeyVehicle?.position && !journeyVehicle.arrived && !autoFollow ? handleRecenterOnVehicle : undefined
+        }
       />
 
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
@@ -1011,6 +1201,42 @@ export default function TrafficMap({
                 />
               );
             })}
+          {/* Active-journey traveled/remaining split — real sub-polylines of
+              the route's own coordinates from useJourneySimulation, never a
+              client-invented shape. Drawn over the plain route line above so
+              the covered portion visibly reads as "done." */}
+          {journeyVehicle && viewBounds && journeyVehicle.remaining.length >= 2 && (
+            <path
+              d={journeyVehicle.remaining
+                .map((c, i) => {
+                  const { x, y } = projectToViewBox(c.lng, c.lat, viewBounds, bw, bh);
+                  return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+                })
+                .join(" ")}
+              fill="none"
+              stroke={JOURNEY_REMAINING_COLOR}
+              strokeWidth={4}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.95}
+            />
+          )}
+          {journeyVehicle && viewBounds && journeyVehicle.traveled.length >= 2 && (
+            <path
+              d={journeyVehicle.traveled
+                .map((c, i) => {
+                  const { x, y } = projectToViewBox(c.lng, c.lat, viewBounds, bw, bh);
+                  return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+                })
+                .join(" ")}
+              fill="none"
+              stroke={JOURNEY_TRAVELED_COLOR}
+              strokeWidth={4}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={1}
+            />
+          )}
           {layers.vehicles && viewBounds && (
             <VehicleLayer vehicles={interpolatedVehicles} bounds={viewBounds} width={bw} height={bh} />
           )}
@@ -1079,6 +1305,47 @@ export default function TrafficMap({
               </div>
             );
           })}
+
+      {/* Real active-journey vehicle marker — SVG-fallback mode only (native
+          JOURNEY_VEHICLE_LAYER above handles Mapbox). Position/heading come
+          entirely from hooks/useJourneySimulation.ts, never invented here. */}
+      {!hasToken && viewBounds && journeyVehicle?.position && (() => {
+        const { x, y } = projectToViewBox(journeyVehicle.position.lng, journeyVehicle.position.lat, viewBounds, bw, bh);
+        return (
+          <div
+            data-testid="journey-vehicle-marker"
+            className="absolute z-30 pointer-events-none -translate-x-1/2 -translate-y-1/2"
+            style={{ left: `${(x / bw) * 100}%`, top: `${(y / bh) * 100}%` }}
+          >
+            <JourneyVehicleMarker headingDeg={journeyVehicle.headingDeg} arrived={journeyVehicle.arrived} />
+          </div>
+        );
+      })()}
+
+      {/* Destination highlight — the route's real final coordinate,
+          emphasized once the journey actually reaches it ("ARRIVED"). */}
+      {!hasToken && viewBounds && activeRoute && activeRoute.coordinates.length > 0 && journeyVehicle && (
+        (() => {
+          const dest = activeRoute.coordinates[activeRoute.coordinates.length - 1];
+          const { x, y } = projectToViewBox(dest.lng, dest.lat, viewBounds, bw, bh);
+          return (
+            <div
+              className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-full"
+              style={{ left: `${(x / bw) * 100}%`, top: `${(y / bh) * 100}%` }}
+            >
+              <div
+                className={`flex items-center justify-center w-7 h-7 rounded-full border-2 shadow-lg ${
+                  journeyVehicle.arrived
+                    ? "bg-emerald-500 border-white animate-pulse"
+                    : "bg-slate-900/90 border-slate-300"
+                }`}
+              >
+                <Flag className={`w-3.5 h-3.5 ${journeyVehicle.arrived ? "text-white" : "text-slate-300"}`} />
+              </div>
+            </div>
+          );
+        })()
+      )}
 
       <div className="absolute top-3 left-3 z-20 flex items-center gap-2 text-xs">
         <div className="flex items-center gap-2 bg-slate-900/90 text-white px-3 py-1.5 rounded-lg border border-slate-700 backdrop-blur">

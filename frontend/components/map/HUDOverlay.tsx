@@ -1,6 +1,6 @@
 "use client";
 
-import { Layers, Eye, EyeOff, Box, Car, ShieldAlert, Ambulance as AmbulanceIcon, Compass, Plus, Minus } from "lucide-react";
+import { Layers, Eye, EyeOff, Box, Car, ShieldAlert, Ambulance as AmbulanceIcon, Compass, Plus, Minus, LocateFixed } from "lucide-react";
 
 export interface LayerVisibilityState {
   buildings: boolean;
@@ -26,6 +26,10 @@ interface HUDOverlayProps {
    * affordance that's discoverable without them. */
   onZoomIn?: () => void;
   onZoomOut?: () => void;
+  /** Present only during an active journey once the user has manually
+   * panned/zoomed away from the vehicle (see TrafficMap.tsx's autoFollow) —
+   * "provide a working recenter/follow vehicle behavior." */
+  onRecenterVehicle?: () => void;
 }
 
 export default function HUDOverlay({
@@ -35,6 +39,7 @@ export default function HUDOverlay({
   showBuildingsToggle = true,
   onZoomIn,
   onZoomOut,
+  onRecenterVehicle,
 }: HUDOverlayProps) {
   // The map's own drag/zoom listeners are native addEventListener calls on
   // this panel's outer container (see TrafficMap.tsx) — native bubbling
@@ -144,6 +149,18 @@ export default function HUDOverlay({
             <Minus className="w-3.5 h-3.5" />
           </button>
         </div>
+      )}
+
+      {/* Recenter on active-journey vehicle — only shown once the user has
+          manually panned away from it (see TrafficMap.tsx's autoFollow). */}
+      {onRecenterVehicle && (
+        <button
+          onClick={onRecenterVehicle}
+          className="bg-sky-600 text-white hover:bg-sky-700 backdrop-blur-md p-2 rounded-xl border border-sky-400/60 shadow-lg flex items-center justify-center gap-1.5 text-[11px] font-bold transition-all animate-pulse"
+        >
+          <LocateFixed className="w-3.5 h-3.5" />
+          <span>Recenter</span>
+        </button>
       )}
 
       {/* Camera Reset Button */}

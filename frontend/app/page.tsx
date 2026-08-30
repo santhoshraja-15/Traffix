@@ -32,7 +32,8 @@ import {
 } from "@/hooks/useRouteReoptimization";
 import { API_ORIGIN } from "@/lib/constants";
 import { fetchHealth } from "@/services/networkApi";
-import { CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react";
+import { useJourneySimulation } from "@/hooks/useJourneySimulation";
+import { CheckCircle2, ShieldAlert, RefreshCw, Flag } from "lucide-react";
 
 export default function HomePage() {
   const [routes, setRoutes] = useState<RouteOption[]>([]);
@@ -60,7 +61,6 @@ export default function HomePage() {
   // capability exists to track an ordinary user's live position along a
   // route, unlike SUMO vehicles or the emergency-mission system). ─────────
   const [journeyStartedAt, setJourneyStartedAt] = useState<number | null>(null);
-  const [journeyNow, setJourneyNow] = useState<number | null>(null);
   const lastJourneyRouteId = useRef<string | undefined>(undefined);
   const [showComparison, setShowComparison] = useState(false);
 
@@ -106,6 +106,25 @@ export default function HomePage() {
 
   // ── Live KPI + congestion breakdown, computed from the real edge stream ──
   const { kpi } = useLiveKpi(edges);
+
+  // Real active-journey vehicle position/progress — real route geometry +
+  // real elapsed time + real live per-edge traffic, never a fabricated
+  // simulation. See hooks/useJourneySimulation.ts's doc comment.
+  const journey = useJourneySimulation(selectedRoute, journeyStartedAt, edges);
+  const journeyJustArrived = useRef(false);
+  useEffect(() => {
+    if (journey.arrived && !journeyJustArrived.current) {
+      journeyJustArrived.current = true;
+      pushMessage({
+        id: `msg-${Date.now()}-arrived`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "success",
+        text: "🏁 Destination reached",
+        details: selectedRoute ? `Arrived via ${selectedRoute.name}.` : undefined,
+      });
+    }
+    if (!journey.arrived) journeyJustArrived.current = false;
+  }, [journey.arrived, selectedRoute, pushMessage]);
 
   // Real "rescue success" notice — fires once per mission, exactly when its
   // real state actually transitions to emergency_completed (never guessed,
@@ -179,35 +198,32 @@ export default function HomePage() {
     });
   }, [wsConnected, pushMessage]);
 
-  // Selecting a different route (a new search, or picking an alternate from
-  // TopRoutes/RouteComparison) ends any in-progress journey — starting a
-  // journey is a real, deliberate action tied to a specific route, not
-  // something that should silently carry over to a route the user never
-  // clicked "Start Journey" on.
+  // Selecting a DIFFERENT route the user chose themselves (a new search, or
+  // picking an alternate from TopRoutes/RouteComparison) ends any
+  // in-progress journey — starting a journey is a real, deliberate action
+  // tied to a specific route. A REROUTE (the backend automatically
+  // recomputing the active route — see useRouteReoptimization below) is
+  // different: the journey continues on the new route with its
+  // already-covered distance preserved (rerouteInProgress, set by
+  // handleRouteUpdated just before it swaps the route) — "smoothly
+  // transition onto the new route... never teleport the vehicle" per the
+  // active-navigation spec.
+  const rerouteInProgress = useRef(false);
   useEffect(() => {
     if (selectedRoute?.id !== lastJourneyRouteId.current) {
       lastJourneyRouteId.current = selectedRoute?.id;
+      if (rerouteInProgress.current) {
+        rerouteInProgress.current = false;
+        return; // preserve journeyStartedAt — useJourneySimulation carries the distance forward
+      }
       setJourneyStartedAt(null);
     }
   }, [selectedRoute?.id]);
 
-  // Real wall-clock ticking, once per second, only while a journey is
-  // actually in progress — this is the one genuinely live figure
-  // JourneyMetrics shows (Time Elapsed); everything else on that panel is
-  // either the route's real planned totals or honestly "not tracked."
-  useEffect(() => {
-    if (journeyStartedAt === null) {
-      setJourneyNow(null);
-      return;
-    }
-    setJourneyNow(Date.now());
-    const interval = setInterval(() => setJourneyNow(Date.now()), 1000);
-    return () => clearInterval(interval);
-  }, [journeyStartedAt]);
-
-  const elapsedMinutes =
-    journeyStartedAt !== null && journeyNow !== null ? (journeyNow - journeyStartedAt) / 60_000 : null;
-
+  // Real elapsed time, distance, speed, ETA and position all come from
+  // useJourneySimulation above (one real animation loop) — no separate
+  // ticking timer here, per the active-navigation spec's explicit "do not
+  // introduce a second competing journey timer."
   const handleStartJourney = () => {
     if (!selectedRoute) return;
     setJourneyStartedAt(Date.now());
@@ -216,7 +232,7 @@ export default function HomePage() {
       timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
       type: "system",
       text: "Navigation started",
-      details: `Journey started on ${selectedRoute.name}. Elapsed time is real; distance covered has no live position feed to track.`,
+      details: `Journey started on ${selectedRoute.name}.`,
     });
   };
 
@@ -272,6 +288,10 @@ export default function HomePage() {
   // when that signal has moved meaningfully — see hooks/useRouteReoptimization.ts.
   const handleRouteUpdated = ({ previous, result, reason, isEmergencyZone }: RouteUpdateEvent) => {
     setRoutes(result.optimalRoutes);
+    // This is an automatic reroute of the already-active route, not a new
+    // user pick — preserve the in-progress journey (see the reset-effect
+    // above) rather than resetting it to a fresh, unstarted state.
+    if (journeyStartedAt !== null) rerouteInProgress.current = true;
     setSelectedRoute(result.recommendedRoute);
     setRouteUpdateNotice({
       previousEtaMinutes: previous.etaMinutes,
@@ -526,27 +546,46 @@ export default function HomePage() {
           <div className="lg:col-span-8 flex flex-col gap-2 h-full">
             <NavigationBar areaName="Anna Nagar, Chennai" instruction={nextInstruction} />
 
+            {journey.arrived && (
+              <div className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 text-xs font-bold text-emerald-900 flex items-center gap-2 shadow-xs">
+                <Flag className="w-4 h-4 text-emerald-600" />
+                <span>🏁 ARRIVED — Destination reached{selectedRoute ? ` via ${selectedRoute.name}` : ""}.</span>
+              </div>
+            )}
+
             <div className="h-[520px] w-full relative shadow-sm rounded-b-xl">
               <TrafficMap
                 activeRoute={selectedRoute ?? undefined}
                 accidents={liveAccidents}
                 missions={liveMissions}
-                isNavigating={true}
+                isNavigating={journeyStartedAt !== null}
                 riskByEdge={riskByEdge}
                 vehicles={liveVehicles}
+                journeyVehicle={
+                  journeyStartedAt !== null
+                    ? {
+                        position: journey.position,
+                        headingDeg: journey.headingDeg,
+                        traveled: journey.traveled,
+                        remaining: journey.remaining,
+                        arrived: journey.arrived,
+                      }
+                    : undefined
+                }
                 onBaselineReady={() => setMapReady(true)}
               />
             </div>
 
-            {/* Only shown once a real route exists. Time Elapsed is real
-                (wall-clock since Start Journey); Distance Covered is
-                honestly "not tracked" — see JourneyMetrics.tsx's doc
-                comment for why neither can be faked here. */}
+            {/* Only shown once a real route exists. Time Elapsed, Distance
+                Covered/Left, current speed and ETA are all real once a
+                journey is active (useJourneySimulation); before that,
+                Distance Covered honestly reads "not tracked" — see
+                JourneyMetrics.tsx's doc comment. */}
             {selectedRoute && (
               <JourneyMetrics
                 route={selectedRoute}
                 journeyStartedAt={journeyStartedAt}
-                elapsedMinutes={elapsedMinutes}
+                journey={journey}
                 onStartJourney={handleStartJourney}
               />
             )}
