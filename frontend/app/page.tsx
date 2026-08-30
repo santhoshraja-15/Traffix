@@ -31,6 +31,7 @@ import {
   EmergencyZoneWarningEvent,
 } from "@/hooks/useRouteReoptimization";
 import { API_ORIGIN } from "@/lib/constants";
+import { fetchHealth } from "@/services/networkApi";
 import { CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react";
 
 export default function HomePage() {
@@ -119,8 +120,10 @@ export default function HomePage() {
 
   useEffect(() => {
     if (!mapReady) return;
-    fetch(`${API_ORIGIN}/health`)
-      .then((res) => res.json())
+    // Timeout-protected (see services/networkApi.ts::fetchHealth) — this
+    // used to be its own raw fetch() with no bound, duplicating
+    // fetchHealth() while also lacking its timeout fix.
+    fetchHealth()
       .then((data) => {
         console.log("[TRAFFIX] /health", data);
         pushMessage({

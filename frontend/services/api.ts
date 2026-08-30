@@ -13,10 +13,16 @@ export class ApiError extends Error {
 }
 
 // ── Timeout wrapper ───────────────────────────────────────────────────────────
-function fetchWithTimeout(
+// Exported so callers hitting a URL outside the /api prefix (e.g. the root
+// -level /health probe — see networkApi.ts::fetchHealth) can still get a
+// bounded wait instead of a raw, un-timeout-protected fetch(). A hung
+// backend (port occupied by an unrelated process, network partition, etc.)
+// must fail into the app's real "data unavailable" state within a bounded
+// time, never spin a "Loading…" label forever.
+export function fetchWithTimeout(
   url: string,
   options: RequestInit,
-  timeoutMs: number
+  timeoutMs: number = API_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

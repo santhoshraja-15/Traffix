@@ -18,7 +18,8 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { API_BASE_URL, WS_BASE_URL } from "../lib/constants";
+import { API_BASE_URL, API_TIMEOUT_MS, WS_BASE_URL } from "../lib/constants";
+import { fetchWithTimeout } from "../services/api";
 
 // ── Shared stream types (exported — useSimulationStream re-exports these) ─────
 
@@ -255,7 +256,12 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
 
     // Kick off simulation then open WS.
     // Fire-and-forget: if the simulation is already running the POST is a no-op.
-    fetch(`${API_BASE_URL}/simulation/start`, {
+    // Timeout-protected (fetchWithTimeout) rather than a raw fetch() — this
+    // call previously had no bound at all, so an unreachable backend (e.g.
+    // the configured port occupied by an unrelated process that accepts
+    // connections but never responds) would leave it pending forever and
+    // connect() — which opens the real WebSocket — would never run at all.
+    fetchWithTimeout(`${API_BASE_URL}/simulation/start`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -267,7 +273,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
           rainfall:        0.1,
         },
       }),
-    }).catch(() => {
+    }, API_TIMEOUT_MS).catch(() => {
       // Simulation start is optional; the socket still connects.
     }).finally(connect);
 
