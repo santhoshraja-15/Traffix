@@ -38,6 +38,10 @@ export interface RouteOption {
   roadName: string; // e.g. "Road A", "Anna Salai"
   coordinates: GeoCoordinates[];
   roadIds: string[];
+  /** Full real ordered street names traversed (backend-deduplicated
+   * consecutive repeats, unnamed edges dropped) — used to build real
+   * turn-by-turn directions, see lib/turnInstructions.ts. */
+  roadNames: string[];
   distanceKm: number;
   etaMinutes: number;
   averageSpeedKmh: number;

@@ -7,7 +7,7 @@ import { DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM, DEFAULT_MAP_PITCH, MAPBOX_TOKEN }
 import { RouteOption, LocationSuggestion } from "@/types/route";
 import { TrafficStateSnapshot } from "@/types/traffic";
 import type { FeatureCollection } from "geojson";
-import { boundsFromTopology, NetworkTopology, projectToViewBox, riskToColor } from "@/lib/map";
+import { boundsFromTopology, NetworkTopology, TopologyFeature, projectToViewBox, riskToColor } from "@/lib/map";
 import { fetchNetworkTopology } from "@/services/networkApi";
 import { fetchRealHospitals } from "@/services/ambulanceApi";
 import { EdgeRiskMap, StreamAccident, StreamMission, StreamVehicle } from "@/hooks/useSimulationStream";
@@ -43,6 +43,13 @@ const CORRIDOR_LAYER = "green-corridor-line";
 // LOW-risk roads) and from the user route's blue — a clearly separate,
 // bold emergency accent per DESIGN_SYSTEM.md §3/§7.
 const CORRIDOR_COLOR = "#16a34a";
+const AFFECTED_CORRIDOR_SOURCE = "affected-corridors";
+const AFFECTED_CORRIDOR_LAYER = "affected-corridors-line";
+// Distinct from both the ambulance green corridor and the user's blue
+// route — a dashed warning amber tracing the real, currently-reduced-
+// capacity road segment (see app/routing/graph_manager.py::apply_capacity_multiplier),
+// not just a point marker at the accident's location.
+const AFFECTED_CORRIDOR_COLOR = "#f97316";
 const AMBULANCE_SOURCE = "active-ambulances";
 const AMBULANCE_LAYER = "active-ambulances-dots";
 const HOSPITALS_SOURCE = "real-hospitals";
@@ -76,6 +83,35 @@ function accidentsToGeoJSON(accidents: StreamAccident[]): FeatureCollection {
         properties: { id: a.accident_id, severity: a.severity, roadName: a.road_name },
         geometry: { type: "Point", coordinates: [a.lng as number, a.lat as number] },
       })),
+  };
+}
+
+// The real, currently-reduced-capacity road segment for each active
+// accident — its actual full geometry (not a straight line, not just the
+// point marker), looked up from the already-loaded real network topology
+// by the accident's own edge_id.
+function getAccidentCorridorFeatures(
+  accidents: StreamAccident[],
+  topology: NetworkTopology | null
+): TopologyFeature[] {
+  if (!topology) return [];
+  const byEdgeId = new Map(topology.features.map((f) => [f.properties.edge_id, f]));
+  return accidents
+    .map((a) => byEdgeId.get(a.edge_id))
+    .filter((f): f is TopologyFeature => f !== undefined);
+}
+
+function accidentCorridorsToGeoJSON(
+  accidents: StreamAccident[],
+  topology: NetworkTopology | null
+): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: getAccidentCorridorFeatures(accidents, topology).map((f) => ({
+      type: "Feature" as const,
+      properties: { edge_id: f.properties.edge_id },
+      geometry: f.geometry,
+    })),
   };
 }
 
@@ -389,6 +425,25 @@ export default function TrafficMap({
             });
           }
 
+          if (!map.current.getSource(AFFECTED_CORRIDOR_SOURCE)) {
+            map.current.addSource(AFFECTED_CORRIDOR_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: AFFECTED_CORRIDOR_LAYER,
+              type: "line",
+              source: AFFECTED_CORRIDOR_SOURCE,
+              layout: { "line-cap": "round", "line-join": "round" },
+              paint: {
+                "line-width": 6,
+                "line-color": AFFECTED_CORRIDOR_COLOR,
+                "line-opacity": 0.9,
+                "line-dasharray": [2, 1.5],
+              },
+            });
+          }
+
           if (!map.current.getSource(AMBULANCE_SOURCE)) {
             map.current.addSource(AMBULANCE_SOURCE, {
               type: "geojson",
@@ -503,6 +558,14 @@ export default function TrafficMap({
     source.setData(accidentsToGeoJSON(accidents));
   }, [accidents]);
 
+  // The real affected road segment for each active accident — its actual
+  // geometry from the already-loaded network topology, not a point.
+  useEffect(() => {
+    const source = map.current?.getSource(AFFECTED_CORRIDOR_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(accidentCorridorsToGeoJSON(accidents, topologyRef.current));
+  }, [accidents, topology]);
+
   // Real emergency missions — green corridor route + ambulance position,
   // both real (see app/emergency/mission_manager.py), updated every tick.
   useEffect(() => {
@@ -615,6 +678,33 @@ export default function TrafficMap({
                   />
                 );
               })}
+          {/* The real affected road segment for each active accident — its
+              actual geometry from the loaded topology, not just a point
+              marker (see accidentCorridorsToGeoJSON above). */}
+          {layers.incidents &&
+            bounds &&
+            topology &&
+            getAccidentCorridorFeatures(accidents, topology).map((f) => {
+              const d = f.geometry.coordinates
+                .map(([lng, lat], i) => {
+                  const { x, y } = projectToViewBox(lng, lat, bounds, SVG_W, SVG_H);
+                  return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+                })
+                .join(" ");
+              return (
+                <path
+                  key={f.properties.edge_id}
+                  d={d}
+                  fill="none"
+                  stroke={AFFECTED_CORRIDOR_COLOR}
+                  strokeWidth={5}
+                  strokeDasharray="6 4"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  opacity={0.9}
+                />
+              );
+            })}
           {layers.vehicles && bounds && (
             <VehicleLayer vehicles={interpolatedVehicles} bounds={bounds} width={SVG_W} height={SVG_H} />
           )}

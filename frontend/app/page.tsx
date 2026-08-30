@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Header from "@/components/common/Header";
 import LocationSearch from "@/components/navigation/LocationSearch";
 import NavigationBar from "@/components/navigation/NavigationBar";
@@ -22,6 +22,7 @@ import { RouteOption } from "@/types/route";
 import { AccidentSeverity } from "@/types/accident";
 
 import { MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
+import { buildTurnInstructions } from "@/lib/turnInstructions";
 import { calculateRoutes } from "@/services/navigationApi";
 import { simulateAccident, resolveAccident } from "@/services/accidentApi";
 import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
@@ -74,11 +75,50 @@ export default function HomePage() {
   const primaryAccident = liveAccidents[0] ?? null;
   const primaryMission = liveMissions[0] ?? null;
 
+  // Real "next instruction" — derived entirely from the active route's own
+  // geometry and real ordered street names (lib/turnInstructions.ts). There
+  // is no live GPS feed for the person planning a route here, so this is
+  // the route's first real maneuver from its start, not a live position
+  // update — never the fabricated "Turn right onto Anna Salai Direct"
+  // default NavigationBar used to render unconditionally.
+  const nextInstruction = useMemo(() => {
+    if (!selectedRoute) return undefined;
+    const steps = buildTurnInstructions(selectedRoute.coordinates, selectedRoute.roadNames);
+    const first = steps[0];
+    if (!first) return undefined;
+    return {
+      ...first,
+      timeSeconds:
+        selectedRoute.averageSpeedKmh > 0
+          ? Math.round((first.distanceMeters / 1000 / selectedRoute.averageSpeedKmh) * 3600)
+          : 0,
+    };
+  }, [selectedRoute]);
+
   // ── Live KPI + congestion breakdown, computed from the real edge stream ──
   const { kpi } = useLiveKpi(edges);
 
   // ── Live intelligence message feed ────────────────────────────────────────
   const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
+
+  // Real "rescue success" notice — fires once per mission, exactly when its
+  // real state actually transitions to emergency_completed (never guessed,
+  // never re-fired on every render while it stays completed).
+  const seenCompletedMissions = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const m of liveMissions) {
+      if (m.state === "emergency_completed" && !seenCompletedMissions.current.has(m.mission_id)) {
+        seenCompletedMissions.current.add(m.mission_id);
+        pushMessage({
+          id: `msg-${Date.now()}-rescue-${m.mission_id}`,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+          type: "success",
+          text: "✅ Rescue completed",
+          details: `${m.unit_number} completed the mission from ${m.hospital_name} and returned to service.`,
+        });
+      }
+    }
+  }, [liveMissions, pushMessage]);
 
   useEffect(() => {
     if (!mapReady) return;
@@ -86,11 +126,50 @@ export default function HomePage() {
       .then((res) => res.json())
       .then((data) => {
         console.log("[TRAFFIX] /health", data);
+        pushMessage({
+          id: `msg-${Date.now()}-health`,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+          type: "info",
+          text: "Backend Connected",
+          details: `TRAFFIX API v${data.version ?? "?"} reachable at ${API_ORIGIN}.`,
+        });
       })
       .catch(() => {
         console.log("[TRAFFIX] /health not reachable yet");
+        pushMessage({
+          id: `msg-${Date.now()}-health-err`,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+          type: "warning",
+          text: "Backend Offline",
+          details: `Could not reach ${API_ORIGIN}/health.`,
+          urgent: true,
+        });
       });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady]);
+
+  // ── Real system-level connect/disconnect notice — pushed only on an
+  // actual state transition (never spammy re-pushes while steady), using
+  // the same wsConnected flag the status badge already reflects.
+  const prevWsConnected = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (prevWsConnected.current === null) {
+      prevWsConnected.current = wsConnected;
+      return;
+    }
+    if (prevWsConnected.current === wsConnected) return;
+    prevWsConnected.current = wsConnected;
+    pushMessage({
+      id: `msg-${Date.now()}-ws`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "system",
+      text: wsConnected ? "Realtime stream connected" : "Realtime stream disconnected",
+      details: wsConnected
+        ? "Live simulation WebSocket reconnected — map and KPIs resuming."
+        : "Live simulation WebSocket dropped — attempting to reconnect.",
+      urgent: !wsConnected,
+    });
+  }, [wsConnected, pushMessage]);
 
   // ── FROM/TO routing — real backend request, no scripted/fake steps ───────
   const handleSearch = async (origin: string, destination: string) => {
@@ -154,7 +233,7 @@ export default function HomePage() {
     pushMessage({
       id: `msg-${Date.now()}-reroute`,
       timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: isEmergencyZone ? "accident" : "routing",
+      type: isEmergencyZone ? "emergency" : "routing",
       text: isEmergencyZone ? "⚠ EMERGENCY ZONE AHEAD" : "ROUTE UPDATED",
       details: reason,
       urgent: isEmergencyZone,
@@ -166,7 +245,7 @@ export default function HomePage() {
     pushMessage({
       id: `msg-${Date.now()}-zone-warning`,
       timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: "accident",
+      type: "emergency",
       text: "⚠ ACTIVE ACCIDENT ON YOUR ROUTE",
       details: `${accident.road_name} — ${accident.severity.toUpperCase()} severity. No faster alternative was found; continue with caution.`,
       urgent: true,
@@ -396,7 +475,7 @@ export default function HomePage() {
 
           {/* LEFT: Map View & Journey Metrics */}
           <div className="lg:col-span-8 flex flex-col gap-2 h-full">
-            <NavigationBar areaName="Anna Nagar, Chennai" />
+            <NavigationBar areaName="Anna Nagar, Chennai" instruction={nextInstruction} />
 
             <div className="h-[520px] w-full relative shadow-sm rounded-b-xl">
               <TrafficMap

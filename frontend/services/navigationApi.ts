@@ -98,6 +98,7 @@ function toRouteOption(route: ApiCandidateRoute, riskByEdge: EdgeRiskMap): Route
     roadName,
     coordinates: route.coords,
     roadIds: route.edges,
+    roadNames: route.road_names,
     distanceKm,
     etaMinutes,
     averageSpeedKmh,
