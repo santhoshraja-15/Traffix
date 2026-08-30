@@ -5,13 +5,12 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM, DEFAULT_MAP_PITCH, MAPBOX_TOKEN } from "@/lib/constants";
 import { RouteOption } from "@/types/route";
-import { Accident } from "@/types/accident";
 import { Ambulance } from "@/types/ambulance";
 import { TrafficStateSnapshot } from "@/types/traffic";
 import type { FeatureCollection } from "geojson";
 import { boundsFromTopology, NetworkTopology, projectToViewBox, riskToColor } from "@/lib/map";
 import { fetchNetworkTopology } from "@/services/networkApi";
-import { EdgeRiskMap, StreamVehicle } from "@/hooks/useSimulationStream";
+import { EdgeRiskMap, StreamAccident, StreamVehicle } from "@/hooks/useSimulationStream";
 import { useVehicleInterpolation } from "@/hooks/useVehicleInterpolation";
 
 import HUDOverlay, { LayerVisibilityState } from "./HUDOverlay";
@@ -36,10 +35,14 @@ const ROUTE_LAYER = "active-route-line";
 // Distinct from the risk-severity palette (green/amber/orange/red) per
 // DESIGN_SYSTEM.md §3 — one clear accent for the active recommended route.
 const ROUTE_COLOR = "#0ea5e9";
+const ACCIDENTS_SOURCE = "active-accidents";
+const ACCIDENTS_LAYER = "active-accidents-dots";
 
 interface TrafficMapProps {
   activeRoute?: RouteOption;
-  accident?: Accident | null;
+  /** Real, currently-active accidents from the WebSocket stream — see
+   * app/services/accident_service.py. Empty array, never fabricated. */
+  accidents?: StreamAccident[];
   ambulance?: Ambulance | null;
   isNavigating?: boolean;
   trafficSnapshot?: TrafficStateSnapshot;
@@ -49,6 +52,19 @@ interface TrafficMapProps {
    * component smooths motion between updates but never invents a vehicle. */
   vehicles?: StreamVehicle[];
   onBaselineReady?: () => void;
+}
+
+function accidentsToGeoJSON(accidents: StreamAccident[]): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: accidents
+      .filter((a) => a.lat !== null && a.lng !== null)
+      .map((a) => ({
+        type: "Feature",
+        properties: { id: a.accident_id, severity: a.severity, roadName: a.road_name },
+        geometry: { type: "Point", coordinates: [a.lng as number, a.lat as number] },
+      })),
+  };
 }
 
 function routeToGeoJSON(route: RouteOption | undefined): FeatureCollection {
@@ -83,7 +99,7 @@ function vehiclesToGeoJSON(vehicles: ReturnType<typeof useVehicleInterpolation>)
 
 export default function TrafficMap({
   activeRoute,
-  accident,
+  accidents = [],
   ambulance,
   isNavigating = false,
   trafficSnapshot = MOCK_TRAFFIC_SNAPSHOT,
@@ -273,6 +289,24 @@ export default function TrafficMap({
               },
             });
           }
+
+          if (!map.current.getSource(ACCIDENTS_SOURCE)) {
+            map.current.addSource(ACCIDENTS_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: ACCIDENTS_LAYER,
+              type: "circle",
+              source: ACCIDENTS_SOURCE,
+              paint: {
+                "circle-radius": 9,
+                "circle-color": "#dc2626",
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+          }
         });
       }
     }
@@ -344,6 +378,13 @@ export default function TrafficMap({
     if (!source) return;
     source.setData(routeToGeoJSON(activeRoute));
   }, [activeRoute]);
+
+  // Real, currently-active accidents — see app/services/accident_service.py.
+  useEffect(() => {
+    const source = map.current?.getSource(ACCIDENTS_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(accidentsToGeoJSON(accidents));
+  }, [accidents]);
 
   const bounds = topology ? boundsFromTopology(topology) : null;
   const live = Object.keys(riskByEdge).length > 0;
@@ -418,6 +459,32 @@ export default function TrafficMap({
         </svg>
       )}
 
+      {/* Real accident markers — SVG-fallback mode only (positioned from each
+          accident's own real lat/lng, never a shared hardcoded offset).
+          When Mapbox is active, the native ACCIDENTS_LAYER circle layer
+          above already renders them correctly under pan/zoom; a DOM overlay
+          positioned via a one-off map.project() call would go stale on the
+          next pan without a React re-render, so it's deliberately not
+          duplicated here. */}
+      {!hasToken &&
+        layers.incidents &&
+        bounds &&
+        accidents
+          .filter((a) => a.lat !== null && a.lng !== null)
+          .map((a) => {
+            const { x, y } = projectToViewBox(a.lng as number, a.lat as number, bounds, SVG_W, SVG_H);
+            return (
+              <div
+                key={a.accident_id}
+                className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-full"
+                style={{ left: `${(x / SVG_W) * 100}%`, top: `${(y / SVG_H) * 100}%` }}
+              >
+                <RippleEffect />
+                <AccidentZone accident={a} />
+              </div>
+            );
+          })}
+
       <div className="absolute top-3 left-3 z-20 flex items-center gap-2 text-xs">
         <div className="flex items-center gap-2 bg-slate-900/90 text-white px-3 py-1.5 rounded-lg border border-slate-700 backdrop-blur">
           <span
@@ -452,12 +519,6 @@ export default function TrafficMap({
           {layers.signals && (
             <div className="absolute left-[280px] top-[180px]">
               <TrafficSignals signals={trafficSnapshot.signals} />
-            </div>
-          )}
-          {layers.incidents && accident && (
-            <div className="absolute left-[480px] top-[140px] -translate-x-1/2 -translate-y-1/2">
-              <RippleEffect />
-              <AccidentZone accident={accident} />
             </div>
           )}
           {layers.emergency && ambulance && ambulance.status !== "idle" && (

@@ -18,12 +18,12 @@ import WsStatusBadge from "@/components/common/WsStatusBadge";
 
 import { ApplicationMode, IntelligenceMessage } from "@/types/common";
 import { RouteOption } from "@/types/route";
-import { Accident, AccidentSeverity } from "@/types/accident";
+import { AccidentSeverity } from "@/types/accident";
 import { Ambulance } from "@/types/ambulance";
 
-import { MOCK_ROUTES, MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
+import { MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
 import { calculateRoutes } from "@/services/navigationApi";
-import { simulateAccident } from "@/services/accidentApi";
+import { simulateAccident, resolveAccident } from "@/services/accidentApi";
 import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
 import { useTraffixContext } from "@/context/TraffixContext";
 import { useRouteReoptimization, RouteUpdateEvent } from "@/hooks/useRouteReoptimization";
@@ -44,17 +44,20 @@ export default function HomePage() {
     nextEtaMinutes: number;
     reason: string;
   } | null>(null);
-  const [accident, setAccident] = useState<Accident | null>(null);
   const [ambulance, setAmbulance] = useState<Ambulance | null>(null);
   const [showComparison, setShowComparison] = useState(false);
 
   const [mapReady, setMapReady] = useState(false);
 
   // ── The one app-wide WebSocket connection, owned by TraffixProvider ──────
-  const { wsConnected, wsStep, riskByEdge, edges, vehicles: liveVehicles } = useTraffixContext();
+  const { wsConnected, wsStep, riskByEdge, edges, vehicles: liveVehicles, accidents: liveAccidents } =
+    useTraffixContext();
+  // Real, backend-confirmed accidents — the UI focuses on the most recent
+  // one; the map itself still renders every active accident (see TrafficMap).
+  const primaryAccident = liveAccidents[0] ?? null;
 
   // ── Live KPI + congestion breakdown, computed from the real edge stream ──
-  const { kpi, setKpi } = useLiveKpi(edges);
+  const { kpi } = useLiveKpi(edges);
 
   // ── Live intelligence message feed ────────────────────────────────────────
   const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
@@ -155,49 +158,62 @@ export default function HomePage() {
     return () => clearTimeout(t);
   }, [routeUpdateNotice]);
 
-  // ── Phase 5: Accident Simulation & Dynamic Rerouting ─────────────────────
+  // ── Accident detection — reports a real accident to the backend, which
+  // applies a genuine capacity reduction to the affected edge. The resulting
+  // rise in real congestion/risk (visible within ~1s on the next simulation
+  // tick) is what actually drives everything downstream: road coloring,
+  // the KPI panel, and — if the active route uses that edge — a real
+  // ROUTE UPDATED via hooks/useRouteReoptimization.ts above. Nothing here
+  // fabricates a reroute; the real pipeline does the work.
   const handleSimulateAccident = async (
-    roadId: string,
+    edgeId: string,
     roadName: string,
     severity: AccidentSeverity
   ) => {
-    const newAccident = await simulateAccident(roadId, severity);
-    setAccident(newAccident);
-
-    // Degrade KPI live
-    setKpi((prev) => ({
-      ...prev,
-      activeIncidents: prev.activeIncidents + 1,
-      networkHealthPct: Math.max(40, prev.networkHealthPct - 24),
-      congestionIndex: Math.min(1, prev.congestionIndex + 0.2),
-    }));
-
-    pushMessage({
-      id: `msg-${Date.now()}-acc`,
-      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: "accident",
-      text: "⚠ ACCIDENT DETECTED",
-      details: `Major bottleneck on ${roadName}. Route blocked. Recalculating alternatives...`,
-      urgent: true,
-    });
-
-    setTimeout(() => {
-      const reroutedRoutes: RouteOption[] = [
-        { ...MOCK_ROUTES[1], isRecommended: true, reasoning: "Bypasses severe accident at Teynampet Junction via Mount Flyover." },
-        { ...MOCK_ROUTES[2], isRecommended: false },
-        { ...MOCK_ROUTES[0], congestion: "congested", riskScore: 0.95, score: 12.0, isRecommended: false, reasoning: "BLOCKED by active multi-vehicle accident." },
-      ];
-      setRoutes(reroutedRoutes);
-      setSelectedRoute(reroutedRoutes[0]);
-
+    try {
+      await simulateAccident(edgeId, severity);
       pushMessage({
-        id: `msg-${Date.now()}-reroute`,
+        id: `msg-${Date.now()}-acc`,
         timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type: "routing",
-        text: "Traffic Rerouted: Mount Flyover Bypass Selected",
-        details: "Navigation automatically updated to avoid high-risk bottleneck.",
+        type: "accident",
+        text: "⚠ ACCIDENT DETECTED",
+        details: `${severity} severity incident on ${roadName}. Backend is recalculating live risk/congestion for the affected road.`,
+        urgent: true,
       });
-    }, 1000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to report the accident.";
+      pushMessage({
+        id: `msg-${Date.now()}-acc-err`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "warning",
+        text: "Accident report failed",
+        details: message,
+        urgent: true,
+      });
+    }
+  };
+
+  const handleResolveAccident = async (accidentId: string) => {
+    try {
+      await resolveAccident(accidentId);
+      pushMessage({
+        id: `msg-${Date.now()}-acc-resolved`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "success",
+        text: "Accident resolved",
+        details: "The affected road's capacity has been restored.",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to resolve the accident.";
+      pushMessage({
+        id: `msg-${Date.now()}-acc-resolve-err`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "warning",
+        text: "Could not resolve accident",
+        details: message,
+        urgent: true,
+      });
+    }
   };
 
   return (
@@ -234,7 +250,7 @@ export default function HomePage() {
           averageSpeedKmh={kpi.avgSpeedKmh}
           stoppedVehicles={kpi.stoppedVehicles}
           networkHealthIndex={kpi.networkHealthPct}
-          activeIncidentsCount={kpi.activeIncidents}
+          activeIncidentsCount={liveAccidents.length}
         />
 
         {/* Search Card */}
@@ -275,18 +291,23 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Active Accident Alert Banner */}
-        {accident && (
+        {/* Active Accident Alert Banner — real backend-confirmed accident state */}
+        {primaryAccident && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs font-semibold text-red-900 flex items-center justify-between shadow-xs animate-pulse">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-red-600" />
               <span>
-                <strong>⚠ ACTIVE INCIDENT:</strong> {accident.description} on {accident.roadName}
+                <strong>⚠ ACTIVE INCIDENT:</strong> {primaryAccident.severity} severity on{" "}
+                {primaryAccident.road_name || primaryAccident.edge_id}
+                {liveAccidents.length > 1 && ` (+${liveAccidents.length - 1} more)`}
               </span>
             </div>
-            <span className="text-[10px] font-bold bg-red-600 text-white px-2 py-0.5 rounded uppercase">
-              Corridor Blocked
-            </span>
+            <button
+              onClick={() => handleResolveAccident(primaryAccident.accident_id)}
+              className="text-[10px] font-bold bg-red-600 hover:bg-red-700 text-white px-2 py-0.5 rounded uppercase transition-all"
+            >
+              Clear Accident
+            </button>
           </div>
         )}
 
@@ -309,7 +330,7 @@ export default function HomePage() {
             <div className="h-[520px] w-full relative shadow-sm rounded-b-xl">
               <TrafficMap
                 activeRoute={selectedRoute ?? undefined}
-                accident={accident}
+                accidents={liveAccidents}
                 ambulance={ambulance}
                 isNavigating={true}
                 riskByEdge={riskByEdge}
@@ -344,7 +365,7 @@ export default function HomePage() {
 
             <AccidentPanel
               onSimulateAccident={handleSimulateAccident}
-              activeAccidentRoadName={accident?.roadName}
+              activeAccidentRoadName={primaryAccident?.road_name || primaryAccident?.edge_id}
             />
 
             <TopRoutes

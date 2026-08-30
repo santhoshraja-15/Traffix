@@ -98,6 +98,12 @@ class RoadNetworkGraph:
                 speed_limit_kmh=speed_kmh,
                 vehicle_count=0,
                 avg_speed=speed_kmh,
+                # The road's undamaged capacity — never mutated by an
+                # accident (see apply_capacity_multiplier). "capacity" above
+                # is the LIVE value; the mock sensor generator needs both
+                # (see app.core.simulation_manager._mutate_edge_sensor_data)
+                # to model demand vs. a locally reduced ability to serve it.
+                nominal_capacity=capacity,
                 # [(lng, lat), ...] — full real geometry, used by to_geojson()
                 # instead of a straight line between the two endpoint nodes.
                 shape=edge.shape,
@@ -163,6 +169,7 @@ class RoadNetworkGraph:
                     congestion=0.0,
                     length_m=edge_length_m,
                     capacity=120,
+                    nominal_capacity=120,
                     vehicle_count=0,
                     avg_speed=base_speed_kmh,
                 )
@@ -250,6 +257,75 @@ class RoadNetworkGraph:
     def get_edge_name(self, edge_id: str) -> str:
         """Real OSM street name for *edge_id*, or "" if it has none/graph is synthetic."""
         return self._edge_name_by_id.get(edge_id, "")
+
+    def _edge_lookup(self) -> Dict[str, Tuple[str, str]]:
+        """Lazily-built, cache-invalidated-on-reinit edge_id -> (u, v) index.
+
+        Works for either graph (real or synthetic fallback) since both set
+        an "edge_id" attribute per edge — used for accident placement/
+        network-impact, which needs to resolve an arbitrary reported edge_id
+        back to its graph edge regardless of which source built the graph.
+        """
+        cache = getattr(self, "_edge_lookup_cache", None)
+        if cache is not None and getattr(self, "_edge_lookup_cache_size", -1) == self.graph.number_of_edges():
+            return cache
+        lookup: Dict[str, Tuple[str, str]] = {}
+        for u, v, data in self.graph.edges(data=True):
+            lookup[str(data.get("edge_id", f"{u}->{v}"))] = (str(u), str(v))
+        self._edge_lookup_cache = lookup
+        self._edge_lookup_cache_size = self.graph.number_of_edges()
+        return lookup
+
+    def get_edge_endpoints(self, edge_id: str) -> Optional[Tuple[str, str]]:
+        return self._edge_lookup().get(edge_id)
+
+    def get_edge_midpoint(self, edge_id: str) -> Optional[Tuple[float, float]]:
+        """(lat, lng) of *edge_id* — its real shape's middle point when
+        available, otherwise the midpoint of its two endpoint nodes."""
+        endpoints = self.get_edge_endpoints(edge_id)
+        if endpoints is None:
+            return None
+        u, v = endpoints
+        data = self.graph.get_edge_data(u, v) if self.graph.has_edge(u, v) else None
+        if data is None:
+            return None
+        shape = data.get("shape")
+        if shape:
+            lng, lat = shape[len(shape) // 2]
+            return lat, lng
+        u_coord = self.get_node_coord(u)
+        v_coord = self.get_node_coord(v)
+        if u_coord is None or v_coord is None:
+            return None
+        return (u_coord[0] + v_coord[0]) / 2.0, (u_coord[1] + v_coord[1]) / 2.0
+
+    def apply_capacity_multiplier(self, edge_id: str, factor: float) -> Optional[float]:
+        """
+        Permanently (until restore_capacity) multiply *edge_id*'s capacity by
+        *factor* — models a physically blocked/narrowed road from an
+        accident. Unlike "weight" (recomputed from scratch every tick by
+        update_edge_weights), "capacity" is never touched by the simulation
+        tick loop except here, so this genuinely persists and feeds real
+        occupancy-driven congestion/risk scoring each tick
+        (get_edge_feature_rows -> predict_congestion / V16 heuristic).
+
+        Returns the original capacity (for restore_capacity), or None if the
+        edge doesn't exist.
+        """
+        endpoints = self.get_edge_endpoints(edge_id)
+        if endpoints is None:
+            return None
+        u, v = endpoints
+        original = float(self.graph[u][v].get("capacity", 120))
+        self.graph[u][v]["capacity"] = max(1.0, original * factor)
+        return original
+
+    def restore_capacity(self, edge_id: str, original_capacity: float) -> None:
+        endpoints = self.get_edge_endpoints(edge_id)
+        if endpoints is None:
+            return
+        u, v = endpoints
+        self.graph[u][v]["capacity"] = original_capacity
 
     def get_node_coord(self, node_id: str) -> Optional[Tuple[float, float]]:
         if not self.graph.has_node(node_id):

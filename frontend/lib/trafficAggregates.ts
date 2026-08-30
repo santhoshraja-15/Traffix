@@ -25,11 +25,9 @@ export interface TrafficAggregates {
   moderateCount: number;
   highCount: number; // heavy
   congestedCount: number; // severe
-  // The backend doesn't broadcast incident/accident state yet (see
-  // FRONTEND_AUDIT.md §1.2 — that's Phase 7 territory), so this always
-  // computes to 0 here; page.tsx's (still-mock) accident simulation
-  // increments it locally via setKpi in the meantime.
-  activeIncidents: number;
+  // Active-incident count is NOT derived here — it comes straight from
+  // the real accidents array (see context/TraffixContext.tsx /
+  // app/services/accident_service.py), used directly by page.tsx.
 }
 
 const EMPTY: TrafficAggregates = {
@@ -42,7 +40,6 @@ const EMPTY: TrafficAggregates = {
   moderateCount: 0,
   highCount: 0,
   congestedCount: 0,
-  activeIncidents: 0,
 };
 
 export function computeTrafficAggregates(edges: StreamEdge[]): TrafficAggregates {
@@ -92,6 +89,5 @@ export function computeTrafficAggregates(edges: StreamEdge[]): TrafficAggregates
     moderateCount,
     highCount,
     congestedCount,
-    activeIncidents: 0,
   };
 }

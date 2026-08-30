@@ -48,6 +48,19 @@ export interface StreamVehicle {
   edge_id: string;
 }
 
+/** A real, currently-active accident — see app/services/accident_service.py.
+ * lat/lng are null only if the reported edge_id isn't found in the graph
+ * (never a placeholder coordinate). */
+export interface StreamAccident {
+  accident_id: string;
+  edge_id: string;
+  severity: string;
+  road_name: string;
+  lat: number | null;
+  lng: number | null;
+  reported_at: string;
+}
+
 export interface SimulationStreamPayload {
   type: string;
   simulation_id: string;
@@ -58,6 +71,7 @@ export interface SimulationStreamPayload {
   source?: string;
   traffic: StreamEdge[];
   vehicles: StreamVehicle[];
+  accidents: StreamAccident[];
   timestamp: string;
 }
 
@@ -80,6 +94,7 @@ export interface UseTrafficSocketReturn {
    * riskByEdge/tick. */
   edges: StreamEdge[];
   vehicles: StreamVehicle[];
+  accidents: StreamAccident[];
   tick: number | undefined;
 }
 
@@ -94,6 +109,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
   const [riskByEdge, setRiskByEdge] = useState<EdgeRiskMap>({});
   const [edges, setEdges] = useState<StreamEdge[]>([]);
   const [vehicles, setVehicles] = useState<StreamVehicle[]>([]);
+  const [accidents, setAccidents] = useState<StreamAccident[]>([]);
   const [tick, setTick] = useState<number | undefined>(undefined);
 
   // Refs — never trigger re-renders, safe to read inside closures.
@@ -124,6 +140,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
       setRiskByEdge(next);
       setEdges(payload.traffic);
       setVehicles(payload.vehicles ?? []);
+      setAccidents(payload.accidents ?? []);
       setTick(payload.tick);
     };
 
@@ -219,5 +236,5 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
     };
   }, [simulationId]);
 
-  return { connected, riskByEdge, edges, vehicles, tick };
+  return { connected, riskByEdge, edges, vehicles, accidents, tick };
 }

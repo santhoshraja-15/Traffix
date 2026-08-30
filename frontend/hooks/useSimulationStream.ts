@@ -16,6 +16,7 @@ import { useTrafficSocket } from "./useWebSocket";
 export type {
   StreamEdge,
   StreamVehicle,
+  StreamAccident,
   SimulationStreamPayload,
   EdgeRiskMap,
 } from "./useWebSocket";

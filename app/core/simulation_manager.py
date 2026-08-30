@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from app.core.websocket_manager import websocket_manager
+from app.emergency.accident_manager import accident_manager
 from app.integrations.existing_ml_adapter import TrafficModelAdapter, get_model_adapter
 from app.integrations.sumo_bridge import SUMO_AVAILABLE, SumoBridge
 from app.ml.model_registry import model_registry
@@ -203,12 +204,20 @@ class SimulationManager:
 
         for u, v, data in graph.graph.edges(data=True):
             capacity: float = float(data.get("capacity", 120))
+            # Demand is modeled off the road's undamaged ("nominal") capacity
+            # — drivers still try to use this road at the same rate even if
+            # an accident has locally reduced how much of it can actually get
+            # through. Using the live (possibly accident-reduced) capacity
+            # here instead would make vehicle_count shrink in lockstep with
+            # capacity, leaving occupancy (and therefore congestion/risk)
+            # unchanged — exactly the bug this comment is here to prevent.
+            nominal_capacity: float = float(data.get("nominal_capacity", capacity))
 
-            base_vehicles = density * capacity
-            jitter = random.uniform(-0.15, 0.15) * capacity
+            base_vehicles = density * nominal_capacity
+            jitter = random.uniform(-0.15, 0.15) * nominal_capacity
             if accident_active:
-                jitter -= 0.1 * capacity
-            vehicle_count = max(0, min(capacity * 1.5, base_vehicles + jitter))
+                jitter -= 0.1 * nominal_capacity
+            vehicle_count = max(0, min(nominal_capacity * 1.5, base_vehicles + jitter))
 
             occupancy = vehicle_count / max(1.0, capacity)
             avg_speed = max(5.0, 60.0 * (1.0 - occupancy) * (1.0 - rainfall * 0.4))
@@ -406,6 +415,25 @@ class SimulationManager:
                 # a fabricated one (never invent vehicles that don't exist).
                 vehicle_events: list[Dict[str, Any]] = raw_vehicles if sumo_active else []
 
+                # Active accidents — real records from AccidentManager (see
+                # app/services/accident_service.py / app/api/accidents.py),
+                # enriched with real location/name from the graph each tick
+                # so a client that connects mid-incident sees the same state.
+                accident_events: list[Dict[str, Any]] = []
+                for record in accident_manager.active_accidents():
+                    midpoint = graph.get_edge_midpoint(record.edge_id)
+                    accident_events.append(
+                        {
+                            "accident_id": record.accident_id,
+                            "edge_id": record.edge_id,
+                            "severity": record.severity,
+                            "road_name": graph.get_edge_name(record.edge_id),
+                            "lat": midpoint[0] if midpoint else None,
+                            "lng": midpoint[1] if midpoint else None,
+                            "reported_at": record.reported_at.isoformat(),
+                        }
+                    )
+
                 payload: Dict[str, Any] = {
                     "type": UpdateType.TRAFFIC.value,
                     "simulation_id": simulation_id,
@@ -416,6 +444,7 @@ class SimulationManager:
                     "source": data_source,
                     "traffic": traffic_events,
                     "vehicles": vehicle_events,
+                    "accidents": accident_events,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 

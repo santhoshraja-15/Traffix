@@ -182,6 +182,7 @@ def get_named_locations(net_path: Path = DEFAULT_NET_PATH) -> List[Dict[str, flo
         return []
 
     by_name: Dict[str, List[Tuple[float, float]]] = {}
+    first_edge_id_by_name: Dict[str, str] = {}
     for edge in real.edges:
         if not edge.name:
             continue
@@ -189,12 +190,21 @@ def get_named_locations(net_path: Path = DEFAULT_NET_PATH) -> List[Dict[str, flo
         if mid is None:
             continue
         by_name.setdefault(edge.name, []).append(mid)
+        first_edge_id_by_name.setdefault(edge.name, edge.edge_id)
 
     locations: List[Dict[str, float | str]] = []
     for name, points in sorted(by_name.items()):
         avg_lng = sum(p[0] for p in points) / len(points)
         avg_lat = sum(p[1] for p in points) / len(points)
-        locations.append({"name": name, "lat": avg_lat, "lng": avg_lng})
+        locations.append({
+            "name": name,
+            "lat": avg_lat,
+            "lng": avg_lng,
+            # A real edge_id on this named street — lets callers (e.g. the
+            # accident-location picker) target a real, routable edge without
+            # a separate nearest-edge lookup.
+            "edge_id": first_edge_id_by_name[name],
+        })
     return locations
 
 

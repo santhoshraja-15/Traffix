@@ -27,6 +27,9 @@ export interface LocationSuggestion {
   name: string;
   lat: number;
   lng: number;
+  /** A real, routable edge on this street — used by the accident-location
+   * picker to target real network data. */
+  edge_id: string;
 }
 
 export interface RouteOption {

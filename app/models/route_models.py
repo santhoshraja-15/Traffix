@@ -68,6 +68,10 @@ class LocationSuggestion(BaseModel):
     name: str
     lat: float
     lng: float
+    # A real, routable edge on this street — lets the accident-location
+    # picker (and anything else that needs a concrete edge, not just a
+    # point) target real network data without a separate lookup.
+    edge_id: str
 
 
 class LocationsResponse(BaseModel):
