@@ -54,6 +54,14 @@ export default function HomePage() {
   // never a fabricated "we rerouted you" claim. See useRouteReoptimization's
   // EmergencyZoneWarningEvent doc comment.
   const [zoneWarning, setZoneWarning] = useState<{ severity: string; roadName: string } | null>(null);
+
+  // ── Journey progress — real elapsed time only, never a fabricated
+  // position/distance (see JourneyMetrics.tsx's doc comment: no backend
+  // capability exists to track an ordinary user's live position along a
+  // route, unlike SUMO vehicles or the emergency-mission system). ─────────
+  const [journeyStartedAt, setJourneyStartedAt] = useState<number | null>(null);
+  const [journeyNow, setJourneyNow] = useState<number | null>(null);
+  const lastJourneyRouteId = useRef<string | undefined>(undefined);
   const [showComparison, setShowComparison] = useState(false);
 
   const [mapReady, setMapReady] = useState(false);
@@ -170,6 +178,47 @@ export default function HomePage() {
       urgent: !wsConnected,
     });
   }, [wsConnected, pushMessage]);
+
+  // Selecting a different route (a new search, or picking an alternate from
+  // TopRoutes/RouteComparison) ends any in-progress journey — starting a
+  // journey is a real, deliberate action tied to a specific route, not
+  // something that should silently carry over to a route the user never
+  // clicked "Start Journey" on.
+  useEffect(() => {
+    if (selectedRoute?.id !== lastJourneyRouteId.current) {
+      lastJourneyRouteId.current = selectedRoute?.id;
+      setJourneyStartedAt(null);
+    }
+  }, [selectedRoute?.id]);
+
+  // Real wall-clock ticking, once per second, only while a journey is
+  // actually in progress — this is the one genuinely live figure
+  // JourneyMetrics shows (Time Elapsed); everything else on that panel is
+  // either the route's real planned totals or honestly "not tracked."
+  useEffect(() => {
+    if (journeyStartedAt === null) {
+      setJourneyNow(null);
+      return;
+    }
+    setJourneyNow(Date.now());
+    const interval = setInterval(() => setJourneyNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [journeyStartedAt]);
+
+  const elapsedMinutes =
+    journeyStartedAt !== null && journeyNow !== null ? (journeyNow - journeyStartedAt) / 60_000 : null;
+
+  const handleStartJourney = () => {
+    if (!selectedRoute) return;
+    setJourneyStartedAt(Date.now());
+    pushMessage({
+      id: `msg-${Date.now()}-journey-start`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "system",
+      text: "Navigation started",
+      details: `Journey started on ${selectedRoute.name}. Elapsed time is real; distance covered has no live position feed to track.`,
+    });
+  };
 
   // ── FROM/TO routing — real backend request, no scripted/fake steps ───────
   const handleSearch = async (origin: string, destination: string) => {
@@ -489,21 +538,16 @@ export default function HomePage() {
               />
             </div>
 
-            {/* Only shown once a real route exists — "covered so far" is
-                honestly 0 (a route was just computed, nothing driven yet);
-                there's no active-journey tracking to report otherwise. */}
+            {/* Only shown once a real route exists. Time Elapsed is real
+                (wall-clock since Start Journey); Distance Covered is
+                honestly "not tracked" — see JourneyMetrics.tsx's doc
+                comment for why neither can be faked here. */}
             {selectedRoute && (
               <JourneyMetrics
-                metrics={{
-                  distanceCoveredKm: 0,
-                  timeTakenMinutes: 0,
-                  distanceLeftKm: selectedRoute.distanceKm,
-                  timeLeftMinutes: Math.round(selectedRoute.etaMinutes),
-                  estimatedReachingTime: new Date(
-                    Date.now() + selectedRoute.etaMinutes * 60_000
-                  ).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false }),
-                  currentSpeedKmh: selectedRoute.averageSpeedKmh,
-                }}
+                route={selectedRoute}
+                journeyStartedAt={journeyStartedAt}
+                elapsedMinutes={elapsedMinutes}
+                onStartJourney={handleStartJourney}
               />
             )}
           </div>
