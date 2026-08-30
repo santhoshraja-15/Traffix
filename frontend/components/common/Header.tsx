@@ -113,11 +113,15 @@ export default function Header() {
             })}
           </nav>
 
-          {/* User Button */}
-          <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100/90 text-slate-700 hover:bg-slate-200 text-xs font-extrabold border border-slate-200 transition-all">
+          {/* User indicator — deliberately not a <button>: there is no
+              account/auth system anywhere in this deployment, so this
+              never had anything to do on click. A real interactive
+              element implies a real action; this is honestly just a
+              static badge. */}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100/90 text-slate-700 text-xs font-extrabold border border-slate-200">
             <User className="w-3.5 h-3.5 text-slate-600" />
             <span className="hidden sm:inline">USER</span>
-          </button>
+          </div>
         </div>
 
       </div>
