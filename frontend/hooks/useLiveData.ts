@@ -37,5 +37,30 @@ export function useLiveMessages(initial: IntelligenceMessage[]) {
     setMessages((prev) => [msg, ...prev].slice(0, 50));
   }, []);
 
-  return { messages, setMessages, pushMessage };
+  // Real acknowledge/dismiss state, driven by an actual user action (the
+  // /alerts page) — powers both that page and the header's unread badge
+  // from the same real event log, instead of two separate fake counts.
+  const acknowledgeMessage = useCallback((id: string) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, acknowledged: true } : m)));
+  }, []);
+
+  const dismissMessage = useCallback((id: string) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, dismissed: true } : m)));
+  }, []);
+
+  const acknowledgeAllMessages = useCallback(() => {
+    setMessages((prev) => prev.map((m) => ({ ...m, acknowledged: true })));
+  }, []);
+
+  const unreadCount = messages.filter((m) => !m.acknowledged && !m.dismissed).length;
+
+  return {
+    messages,
+    setMessages,
+    pushMessage,
+    acknowledgeMessage,
+    dismissMessage,
+    acknowledgeAllMessages,
+    unreadCount,
+  };
 }

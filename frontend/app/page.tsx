@@ -17,15 +17,13 @@ import EmergencyStatusPanel from "@/components/emergency/EmergencyStatusPanel";
 import LoadingOverlay from "@/components/common/LoadingOverlay";
 import WsStatusBadge from "@/components/common/WsStatusBadge";
 
-import { ApplicationMode, IntelligenceMessage } from "@/types/common";
 import { RouteOption } from "@/types/route";
 import { AccidentSeverity } from "@/types/accident";
 
-import { MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
 import { buildTurnInstructions } from "@/lib/turnInstructions";
 import { calculateRoutes } from "@/services/navigationApi";
 import { simulateAccident, resolveAccident } from "@/services/accidentApi";
-import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
+import { useLiveKpi } from "@/hooks/useLiveData";
 import { useTraffixContext } from "@/context/TraffixContext";
 import {
   useRouteReoptimization,
@@ -36,7 +34,6 @@ import { API_ORIGIN } from "@/lib/constants";
 import { CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react";
 
 export default function HomePage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
   const [routes, setRoutes] = useState<RouteOption[]>([]);
   const [selectedRoute, setSelectedRoute] = useState<RouteOption | null>(null);
   const [isSearching, setIsSearching] = useState(false);
@@ -64,11 +61,14 @@ export default function HomePage() {
   const {
     wsConnected,
     wsStep,
+    dataSource,
     riskByEdge,
     edges,
     vehicles: liveVehicles,
     accidents: liveAccidents,
     missions: liveMissions,
+    messages,
+    pushMessage,
   } = useTraffixContext();
   // Real, backend-confirmed accidents/missions — the UI focuses on the most
   // recent one; the map itself still renders every active one (see TrafficMap).
@@ -97,9 +97,6 @@ export default function HomePage() {
 
   // ── Live KPI + congestion breakdown, computed from the real edge stream ──
   const { kpi } = useLiveKpi(edges);
-
-  // ── Live intelligence message feed ────────────────────────────────────────
-  const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
 
   // Real "rescue success" notice — fires once per mission, exactly when its
   // real state actually transitions to emergency_completed (never guessed,
@@ -337,7 +334,7 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} systemConnected={wsConnected} />
+      <Header />
 
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 flex flex-col gap-3 relative">
 
@@ -351,7 +348,7 @@ export default function HomePage() {
         {/* WS status bar — reflects the one real app-wide connection */}
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
-            <WsStatusBadge connected={wsConnected} step={wsStep} />
+            <WsStatusBadge connected={wsConnected} step={wsStep} mock={dataSource === "mock"} />
             {wsConnected && (
               <span className="text-[10px] font-semibold text-slate-400">
                 FastAPI simulation stream — map colors throttled to 1s

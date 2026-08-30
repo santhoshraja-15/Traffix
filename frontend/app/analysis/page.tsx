@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
 import { ShieldCheck, Zap, Car, BarChart3 } from "lucide-react";
 import AiInsightsFeed from "@/components/analysis/AiInsightsFeed";
 import LiveRoadDetail from "@/components/analysis/LiveRoadDetail";
@@ -22,7 +21,6 @@ const TABS: { id: AnalysisTab; label: string }[] = [
 ];
 
 export default function AnalysisPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
   const [activeTab, setActiveTab] = useState<AnalysisTab>("overview");
 
   const { edges, missions } = useTraffixContext();
@@ -65,7 +63,7 @@ export default function AnalysisPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-6 flex flex-col gap-6">
         {/* Page title */}

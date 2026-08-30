@@ -2,23 +2,31 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ApplicationMode } from "../../types/common";
 import { ShieldAlert, BarChart3, Navigation, User, Cpu, Siren, Bell, Settings2 } from "lucide-react";
 import { useTraffixContext } from "@/context/TraffixContext";
 
-interface HeaderProps {
-  mode: ApplicationMode;
-  onModeChange: (newMode: ApplicationMode) => void;
-  systemConnected?: boolean;
-}
-
-export default function Header({
-  mode,
-  onModeChange,
-  systemConnected = true,
-}: HeaderProps) {
+export default function Header() {
   const pathname = usePathname();
-  const { unreadAlerts } = useTraffixContext();
+  // Real connection state, read directly from the one shared context — every
+  // page gets the same honest badge instead of each needing to thread a
+  // `systemConnected` prop through (previously only app/page.tsx did, so
+  // every other page always showed the default "SUMO Stream Active" no
+  // matter what was actually happening).
+  const { unreadAlerts, wsConnected, dataSource } = useTraffixContext();
+  const connectionLabel = !wsConnected
+    ? "Disconnected"
+    : dataSource === "sumo"
+    ? "SUMO Stream Active"
+    : dataSource === "mock"
+    ? "Mock Simulation Active"
+    : "Connecting…";
+  const connectionDotClass = !wsConnected
+    ? "bg-red-500"
+    : dataSource === "sumo"
+    ? "bg-emerald-500 animate-pulse"
+    : dataSource === "mock"
+    ? "bg-amber-500 animate-pulse"
+    : "bg-slate-400 animate-pulse";
 
   const navItems = [
     { name: "NAVIGATION", path: "/", icon: Navigation, badge: 0 },
@@ -54,46 +62,25 @@ export default function Header({
           </div>
         </Link>
 
-        {/* Mode Selector & Status */}
+        {/* Status */}
         <div className="flex items-center gap-4">
-          
-          {/* Mode Switcher */}
-          <div className="flex items-center bg-slate-100/80 p-1 rounded-xl border border-slate-200 text-xs font-semibold">
-            <span className="text-slate-500 px-2 text-[11px] uppercase tracking-wider font-extrabold hidden sm:inline">
-              MODE:
-            </span>
-            <button
-              onClick={() => onModeChange("simulation")}
-              className={`px-3 py-1 rounded-lg transition-all ${
-                mode === "simulation"
-                  ? "bg-white text-sky-600 shadow-xs font-extrabold"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              SIMULATION
-            </button>
-            <button
-              onClick={() => onModeChange("realtime")}
-              className={`px-3 py-1 rounded-lg transition-all ${
-                mode === "realtime"
-                  ? "bg-white text-emerald-600 shadow-xs font-extrabold"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              REALTIME
-            </button>
+
+          {/* Data-source indicator — read-only, reflects the real broadcast
+              source (see hooks/useWebSocket.ts). This used to be a
+              SIMULATION/REALTIME toggle the user could click, but there was
+              never a second real data source to switch to — the backend
+              alone decides sumo vs. mock, so a clickable control here would
+              imply a choice that doesn't exist. */}
+          <div className="hidden sm:flex items-center bg-slate-100/80 px-3 py-1 rounded-xl border border-slate-200 text-[11px] font-extrabold uppercase tracking-wider text-slate-500">
+            {dataSource === "sumo" ? "Live SUMO Mode" : dataSource === "mock" ? "Mock Simulation Mode" : "Mode: —"}
           </div>
 
-          {/* Connection Status Badge */}
+          {/* Connection Status Badge — real wsConnected + real broadcast
+              source (see hooks/useWebSocket.ts), never conflated: a
+              mock-mode stream connects successfully too. */}
           <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-full text-xs bg-slate-50 border border-slate-200">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                systemConnected ? "bg-emerald-500 animate-pulse" : "bg-amber-500"
-              }`}
-            />
-            <span className="text-slate-600 font-semibold">
-              {systemConnected ? "SUMO Stream Active" : "Local Mock Engine"}
-            </span>
+            <span className={`w-2 h-2 rounded-full ${connectionDotClass}`} />
+            <span className="text-slate-600 font-semibold">{connectionLabel}</span>
           </div>
 
         </div>

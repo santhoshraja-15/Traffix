@@ -29,7 +29,7 @@ const SEVERITY_META: Record<
  * network; both sides are now real (see the Phase 10 commit).
  */
 export default function AiInsightsFeed() {
-  const { wsConnected } = useTraffixContext();
+  const { wsConnected, dataSource } = useTraffixContext();
   const [insights, setInsights] = useState<AiInsight[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -78,7 +78,13 @@ export default function AiInsightsFeed() {
               : "text-slate-500 bg-slate-50 border-slate-200"
           }`}
         >
-          {wsConnected ? "SUMO Stream Active" : "Stream Offline"}
+          {!wsConnected
+            ? "Stream Offline"
+            : dataSource === "sumo"
+            ? "SUMO Stream Active"
+            : dataSource === "mock"
+            ? "Mock Simulation Active"
+            : "Connecting…"}
         </span>
       </div>
 

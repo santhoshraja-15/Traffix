@@ -129,6 +129,13 @@ export interface UseTrafficSocketReturn {
   accidents: StreamAccident[];
   missions: StreamMission[];
   tick: number | undefined;
+  /** The real broadcast source for this tick — "sumo" when real TraCI is
+   * connected, "mock" when SimulationManager is generating sensor data
+   * itself (see app/core/simulation_manager.py). Undefined before the
+   * first frame arrives. Never inferred from wsConnected — a mock-mode
+   * WebSocket connects successfully too, so "connected" alone can't tell
+   * these apart (see Header.tsx's connection badge). */
+  dataSource: string | undefined;
 }
 
 /**
@@ -145,6 +152,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
   const [accidents, setAccidents] = useState<StreamAccident[]>([]);
   const [missions, setMissions] = useState<StreamMission[]>([]);
   const [tick, setTick] = useState<number | undefined>(undefined);
+  const [dataSource, setDataSource] = useState<string | undefined>(undefined);
 
   // Refs — never trigger re-renders, safe to read inside closures.
   const wsRef          = useRef<WebSocket | null>(null);
@@ -177,6 +185,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
       setAccidents(payload.accidents ?? []);
       setMissions(payload.emergency_missions ?? []);
       setTick(payload.tick);
+      setDataSource(payload.source);
     };
 
     throttleTimer.current = setInterval(flush, UI_THROTTLE_MS);
@@ -271,5 +280,5 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
     };
   }, [simulationId]);
 
-  return { connected, riskByEdge, edges, vehicles, accidents, missions, tick };
+  return { connected, riskByEdge, edges, vehicles, accidents, missions, tick, dataSource };
 }

@@ -3,7 +3,6 @@
 import { useState } from "react";
 import Link from "next/link";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
 import {
   ShieldAlert,
   Ambulance,
@@ -93,11 +92,10 @@ const CAPABILITIES: Capability[] = [
 ];
 
 export default function FeaturesPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-6 flex flex-col gap-6">
         <div>

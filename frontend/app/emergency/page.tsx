@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
 import { AccidentSeverity } from "@/types/accident";
 import { ShieldAlert, Siren, Ambulance, Hospital, CheckCircle2 } from "lucide-react";
 import AccidentPanel from "@/components/accident/AccidentPanel";
@@ -29,7 +28,6 @@ const STATUS_META: Record<string, { label: string; className: string }> = {
  * which the WebSocket stream doesn't carry — see GET /ambulance/units).
  */
 export default function EmergencyPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
   const { accidents: liveAccidents, missions: liveMissions } = useTraffixContext();
 
   const [fleet, setFleet] = useState<AmbulanceUnit[]>([]);
@@ -67,7 +65,7 @@ export default function EmergencyPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-6 flex flex-col gap-6">
         <div>

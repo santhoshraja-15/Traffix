@@ -5,7 +5,6 @@ import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM, DEFAULT_MAP_PITCH, MAPBOX_TOKEN } from "@/lib/constants";
 import { RouteOption, LocationSuggestion } from "@/types/route";
-import { TrafficStateSnapshot } from "@/types/traffic";
 import type { FeatureCollection } from "geojson";
 import { boundsFromTopology, NetworkTopology, TopologyFeature, projectToViewBox, riskToColor } from "@/lib/map";
 import { fetchNetworkTopology } from "@/services/networkApi";
@@ -15,14 +14,12 @@ import { useVehicleInterpolation } from "@/hooks/useVehicleInterpolation";
 
 import HUDOverlay, { LayerVisibilityState } from "./HUDOverlay";
 import VehicleLayer from "./VehicleLayer";
-import TrafficSignals from "./TrafficSignals";
 import AccidentZone from "./AccidentZone";
 import RippleEffect from "./RippleEffect";
 import AmbulanceLayer from "./AmbulanceLayer";
 import HospitalLayer from "./HospitalLayer";
 
 import { Layers } from "lucide-react";
-import { MOCK_TRAFFIC_SNAPSHOT } from "@/lib/mockData";
 
 const SVG_W = 1000;
 const SVG_H = 720;
@@ -64,7 +61,6 @@ interface TrafficMapProps {
    * app/emergency/mission_manager.py. Empty array, never fabricated. */
   missions?: StreamMission[];
   isNavigating?: boolean;
-  trafficSnapshot?: TrafficStateSnapshot;
   riskByEdge?: EdgeRiskMap;
   /** Latest authoritative vehicle snapshot from the real WebSocket stream —
    * empty whenever SUMO isn't connected (see FRONTEND_AUDIT.md §1.2). This
@@ -199,7 +195,6 @@ export default function TrafficMap({
   accidents = [],
   missions = [],
   isNavigating = false,
-  trafficSnapshot = MOCK_TRAFFIC_SNAPSHOT,
   riskByEdge = {},
   vehicles = [],
   onBaselineReady,
@@ -225,7 +220,6 @@ export default function TrafficMap({
   const [layers, setLayers] = useState<LayerVisibilityState>({
     buildings: true,
     vehicles: true,
-    signals: true,
     incidents: true,
     emergency: true,
     routes: true,
@@ -802,14 +796,6 @@ export default function TrafficMap({
           </div>
         )}
       </div>
-
-      {!hasToken && layers.signals && (
-        <div className="absolute inset-0 pointer-events-none z-10">
-          <div className="absolute left-[280px] top-[180px]">
-            <TrafficSignals signals={trafficSnapshot.signals} />
-          </div>
-        </div>
-      )}
 
       <div className="absolute bottom-3 left-3 right-3 z-20 text-[10px] text-slate-300 flex items-center justify-between">
         <span className="flex items-center gap-1.5 bg-slate-900/80 px-2 py-1 rounded">

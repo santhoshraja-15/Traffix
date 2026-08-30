@@ -1,10 +1,10 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useMemo, useState } from "react";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
-import { AlertSeverity, AlertCategory, TraffixAlert } from "@/types/alerts";
-import { MOCK_ALERTS } from "@/lib/mockAlerts";
+import { IntelligenceMessage } from "@/types/common";
+import { AlertSeverity, AlertCategory } from "@/types/alerts";
+import { useTraffixContext } from "@/context/TraffixContext";
 import {
   Bell,
   ShieldAlert,
@@ -13,10 +13,8 @@ import {
   CheckCircle2,
   X,
   Check,
-  MapPin,
   Radio,
   Filter,
-  RotateCcw,
 } from "lucide-react";
 
 // ── severity config ──────────────────────────────────────────────────────────
@@ -70,6 +68,23 @@ const CATEGORY_COLORS: Record<AlertCategory, string> = {
   system: "bg-slate-100 text-slate-600 border-slate-200",
 };
 
+// Real IntelligenceMessage.type -> the display severity/category here.
+// Never invented: derived directly from the same type/urgent fields the
+// live message feed (MessageBox) already uses (see useLiveData.ts).
+function severityOf(m: IntelligenceMessage): AlertSeverity {
+  if (m.type === "warning") return "warning";
+  if (m.type === "success") return "success";
+  if ((m.type === "accident" || m.type === "emergency") && m.urgent) return "critical";
+  return "info";
+}
+
+function categoryOf(m: IntelligenceMessage): AlertCategory {
+  if (m.type === "accident" || m.type === "emergency" || m.type === "routing" || m.type === "system") {
+    return m.type;
+  }
+  return "system";
+}
+
 type SeverityFilter = AlertSeverity | "all";
 
 const SEVERITY_FILTERS: { id: SeverityFilter; label: string }[] = [
@@ -81,46 +96,33 @@ const SEVERITY_FILTERS: { id: SeverityFilter; label: string }[] = [
 ];
 
 export default function AlertsPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
-  const [alerts, setAlerts] = useState<TraffixAlert[]>(MOCK_ALERTS);
+  const { messages, acknowledgeMessage, dismissMessage, acknowledgeAllMessages } = useTraffixContext();
   const [severityFilter, setSeverityFilter] = useState<SeverityFilter>("all");
   const [showDismissed, setShowDismissed] = useState(false);
 
-  // ── derived counts ────────────────────────────────────────────────────────
+  // ── derived counts — real, from the same live message log everywhere
+  // else in the app reads (the ALERTS nav badge, MessageBox) ─────────────
   const counts = useMemo(() => {
-    const active = alerts.filter((a) => !a.dismissed);
+    const active = messages.filter((m) => !m.dismissed);
     return {
       total: active.length,
-      critical: active.filter((a) => a.severity === "critical").length,
-      warning: active.filter((a) => a.severity === "warning").length,
-      unacked: active.filter((a) => !a.acknowledged).length,
+      critical: active.filter((m) => severityOf(m) === "critical").length,
+      warning: active.filter((m) => severityOf(m) === "warning").length,
+      unacked: active.filter((m) => !m.acknowledged).length,
     };
-  }, [alerts]);
+  }, [messages]);
 
-  // ── filtered list ─────────────────────────────────────────────────────────
   const visible = useMemo(() => {
-    return alerts.filter((a) => {
-      if (!showDismissed && a.dismissed) return false;
-      if (severityFilter !== "all" && a.severity !== severityFilter) return false;
+    return messages.filter((m) => {
+      if (!showDismissed && m.dismissed) return false;
+      if (severityFilter !== "all" && severityOf(m) !== severityFilter) return false;
       return true;
     });
-  }, [alerts, severityFilter, showDismissed]);
-
-  // ── actions ───────────────────────────────────────────────────────────────
-  const acknowledge = (id: string) =>
-    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)));
-
-  const dismiss = (id: string) =>
-    setAlerts((prev) => prev.map((a) => (a.id === id ? { ...a, dismissed: true } : a)));
-
-  const acknowledgeAll = () =>
-    setAlerts((prev) => prev.map((a) => ({ ...a, acknowledged: true })));
-
-  const resetAll = () => setAlerts(MOCK_ALERTS);
+  }, [messages, severityFilter, showDismissed]);
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-6 flex flex-col gap-6">
         {/* Page title */}
@@ -136,27 +138,18 @@ export default function AlertsPage() {
               )}
             </h1>
             <p className="text-sm text-slate-500 mt-1">
-              System-wide alert feed — accidents, routing, signals, IoT, emergency dispatch, and SUMO events.
+              The same real event log MessageBox shows — accidents, routing, missions, and system
+              events, actually pushed as they happen. Nothing here is a canned scenario.
             </p>
           </div>
 
-          {/* Action buttons */}
-          <div className="flex items-center gap-2">
-            <button
-              onClick={acknowledgeAll}
-              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition-all"
-            >
-              <Check className="w-3.5 h-3.5" />
-              Acknowledge All
-            </button>
-            <button
-              onClick={resetAll}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 rounded-xl text-xs font-bold transition-all"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reset
-            </button>
-          </div>
+          <button
+            onClick={acknowledgeAllMessages}
+            className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition-all"
+          >
+            <Check className="w-3.5 h-3.5" />
+            Acknowledge All
+          </button>
         </div>
 
         {/* Summary strip */}
@@ -214,70 +207,53 @@ export default function AlertsPage() {
           {visible.length === 0 && (
             <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-400 text-sm font-semibold shadow-sm">
               <CheckCircle2 className="w-8 h-8 mx-auto mb-3 text-emerald-400" />
-              No alerts match the current filter.
+              {messages.length === 0
+                ? "No events yet — they'll appear here as they really happen."
+                : "No alerts match the current filter."}
             </div>
           )}
 
-          {visible.map((alert) => {
-            const cfg = SEVERITY_CONFIG[alert.severity];
+          {visible.map((m) => {
+            const severity = severityOf(m);
+            const category = categoryOf(m);
+            const cfg = SEVERITY_CONFIG[severity];
             return (
               <div
-                key={alert.id}
+                key={m.id}
                 className={`rounded-xl border shadow-sm overflow-hidden transition-all ${cfg.card} ${
-                  alert.dismissed ? "opacity-50" : ""
+                  m.dismissed ? "opacity-50" : ""
                 }`}
               >
                 <div className="p-4 flex items-start gap-3">
-                  {/* Icon */}
                   <div className="mt-0.5 flex-shrink-0">{cfg.icon}</div>
 
-                  {/* Body */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-start justify-between gap-2 flex-wrap">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="text-sm font-extrabold text-slate-900">{alert.title}</span>
-                        {!alert.acknowledged && !alert.dismissed && (
+                        <span className="text-sm font-extrabold text-slate-900">{m.text}</span>
+                        {!m.acknowledged && !m.dismissed && (
                           <span className="px-1.5 py-0.5 bg-red-500 text-white text-[10px] font-extrabold rounded-full">
                             NEW
                           </span>
                         )}
                       </div>
-
-                      {/* Timestamp */}
-                      <span className="text-[10px] font-mono text-slate-400 flex-shrink-0">
-                        {alert.timestamp}
-                      </span>
+                      <span className="text-[10px] font-mono text-slate-400 flex-shrink-0">{m.timestamp}</span>
                     </div>
 
-                    <p className="text-xs text-slate-600 mt-1 leading-relaxed">{alert.description}</p>
+                    {m.details && <p className="text-xs text-slate-600 mt-1 leading-relaxed">{m.details}</p>}
 
                     <div className="mt-2.5 flex items-center gap-2 flex-wrap">
-                      {/* Severity badge */}
                       <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${cfg.badge}`}>
                         {cfg.label}
                       </span>
-
-                      {/* Category badge */}
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${CATEGORY_COLORS[alert.category]}`}>
-                        {CATEGORY_LABELS[alert.category]}
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full border font-bold ${CATEGORY_COLORS[category]}`}>
+                        {CATEGORY_LABELS[category]}
                       </span>
-
-                      {/* Source */}
                       <span className="flex items-center gap-1 text-[10px] text-slate-400">
                         <Radio className="w-3 h-3" />
-                        {alert.source}
+                        TRAFFIX Live Feed
                       </span>
-
-                      {/* Location */}
-                      {alert.location && (
-                        <span className="flex items-center gap-1 text-[10px] text-slate-400">
-                          <MapPin className="w-3 h-3" />
-                          {alert.location}
-                        </span>
-                      )}
-
-                      {/* Acknowledged indicator */}
-                      {alert.acknowledged && !alert.dismissed && (
+                      {m.acknowledged && !m.dismissed && (
                         <span className="flex items-center gap-1 text-[10px] text-emerald-600 font-bold ml-auto">
                           <CheckCircle2 className="w-3 h-3" />
                           Acknowledged
@@ -286,12 +262,11 @@ export default function AlertsPage() {
                     </div>
                   </div>
 
-                  {/* Action buttons */}
-                  {!alert.dismissed && (
+                  {!m.dismissed && (
                     <div className="flex flex-col gap-1.5 flex-shrink-0">
-                      {!alert.acknowledged && (
+                      {!m.acknowledged && (
                         <button
-                          onClick={() => acknowledge(alert.id)}
+                          onClick={() => acknowledgeMessage(m.id)}
                           title="Acknowledge"
                           className="w-7 h-7 flex items-center justify-center rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-700 border border-emerald-200 transition-all"
                         >
@@ -299,7 +274,7 @@ export default function AlertsPage() {
                         </button>
                       )}
                       <button
-                        onClick={() => dismiss(alert.id)}
+                        onClick={() => dismissMessage(m.id)}
                         title="Dismiss"
                         className="w-7 h-7 flex items-center justify-center rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-500 border border-slate-200 transition-all"
                       >

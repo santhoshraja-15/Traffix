@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from "react";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
 import { SimulationScenario } from "@/types/simulation";
 import SimulationControls from "@/components/simulation/SimulationControls";
 import SimulationStatus from "@/components/simulation/SimulationStatus";
@@ -22,7 +21,6 @@ import {
 import { Cpu } from "lucide-react";
 
 export default function SimulationPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
   const [scenario, setScenario] = useState<SimulationScenario>("medium");
   const [isRunning, setIsRunning] = useState(true);
   const [speedMultiplier, setSpeedMultiplierState] = useState(1.0);
@@ -101,7 +99,7 @@ export default function SimulationPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-6 flex flex-col gap-6">
         {/* Page title */}

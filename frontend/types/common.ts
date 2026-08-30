@@ -14,6 +14,11 @@ export interface IntelligenceMessage {
   text: string;
   details?: string;
   urgent?: boolean;
+  /** Real, user-driven state — see hooks/useLiveData.ts's acknowledge/dismiss.
+   * Drives both the header's unread badge and the /alerts page, so the same
+   * real event stream powers both instead of two separate fake counts. */
+  acknowledged?: boolean;
+  dismissed?: boolean;
 }
 
 export interface SystemHealth {

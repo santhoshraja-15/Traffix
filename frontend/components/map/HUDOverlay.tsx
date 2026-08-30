@@ -1,11 +1,10 @@
 "use client";
 
-import { Layers, Eye, EyeOff, Box, Car, TrafficCone, ShieldAlert, Ambulance as AmbulanceIcon, Compass } from "lucide-react";
+import { Layers, Eye, EyeOff, Box, Car, ShieldAlert, Ambulance as AmbulanceIcon, Compass } from "lucide-react";
 
 export interface LayerVisibilityState {
   buildings: boolean;
   vehicles: boolean;
-  signals: boolean;
   incidents: boolean;
   emergency: boolean;
   routes: boolean;
@@ -62,20 +61,6 @@ export default function HUDOverlay({
               <span>3D Extrusions</span>
             </span>
             {layers.buildings ? <Eye className="w-3 h-3 text-sky-400" /> : <EyeOff className="w-3 h-3 text-slate-600" />}
-          </button>
-
-          {/* Traffic Signals Toggle */}
-          <button
-            onClick={() => onToggleLayer("signals")}
-            className={`flex items-center justify-between px-2 py-1 rounded-lg transition-all ${
-              layers.signals ? "bg-sky-500/20 text-sky-300 font-semibold" : "text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <span className="flex items-center gap-1.5 text-[11px]">
-              <TrafficCone className="w-3.5 h-3.5" />
-              <span>Traffic Signals</span>
-            </span>
-            {layers.signals ? <Eye className="w-3 h-3 text-sky-400" /> : <EyeOff className="w-3 h-3 text-slate-600" />}
           </button>
 
           {/* Incidents Toggle */}
