@@ -26,8 +26,9 @@ import { calculateRoutes } from "@/services/navigationApi";
 import { simulateAccident } from "@/services/accidentApi";
 import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
 import { useTraffixContext } from "@/context/TraffixContext";
+import { useRouteReoptimization, RouteUpdateEvent } from "@/hooks/useRouteReoptimization";
 import { API_ORIGIN } from "@/lib/constants";
-import { CheckCircle2, ShieldAlert } from "lucide-react";
+import { CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react";
 
 export default function HomePage() {
   const [mode, setMode] = useState<ApplicationMode>("simulation");
@@ -37,6 +38,12 @@ export default function HomePage() {
   const [searchStepText, setSearchStepText] = useState("");
   const [shortestRouteNotice, setShortestRouteNotice] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [activeSearch, setActiveSearch] = useState<{ origin: string; destination: string } | null>(null);
+  const [routeUpdateNotice, setRouteUpdateNotice] = useState<{
+    previousEtaMinutes: number;
+    nextEtaMinutes: number;
+    reason: string;
+  } | null>(null);
   const [accident, setAccident] = useState<Accident | null>(null);
   const [ambulance, setAmbulance] = useState<Ambulance | null>(null);
   const [showComparison, setShowComparison] = useState(false);
@@ -76,6 +83,8 @@ export default function HomePage() {
       setRoutes(result.optimalRoutes);
       setSelectedRoute(result.recommendedRoute);
       setShowComparison(true);
+      setRouteUpdateNotice(null);
+      setActiveSearch({ origin, destination }); // enables continuous re-evaluation, see below
       setShortestRouteNotice(
         `Route found: ${result.recommendedRoute.distanceKm.toFixed(1)} km (~${Math.round(
           result.recommendedRoute.etaMinutes
@@ -93,6 +102,7 @@ export default function HomePage() {
       setSearchError(message);
       setRoutes([]);
       setSelectedRoute(null);
+      setActiveSearch(null);
       setShowComparison(false);
       pushMessage({
         id: `msg-${Date.now()}-err`,
@@ -107,6 +117,43 @@ export default function HomePage() {
       setIsSearching(false);
     }
   };
+
+  // ── Continuous rerouting: while a route is active, real live risk along
+  // its own edges is watched and the backend is asked to re-evaluate only
+  // when that signal has moved meaningfully — see hooks/useRouteReoptimization.ts.
+  const handleRouteUpdated = ({ previous, result, reason }: RouteUpdateEvent) => {
+    setRoutes(result.optimalRoutes);
+    setSelectedRoute(result.recommendedRoute);
+    setRouteUpdateNotice({
+      previousEtaMinutes: previous.etaMinutes,
+      nextEtaMinutes: result.recommendedRoute.etaMinutes,
+      reason,
+    });
+    pushMessage({
+      id: `msg-${Date.now()}-reroute`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "routing",
+      text: "ROUTE UPDATED",
+      details: reason,
+    });
+  };
+
+  useRouteReoptimization({
+    active: !!activeSearch && !!selectedRoute,
+    origin: activeSearch?.origin ?? "",
+    destination: activeSearch?.destination ?? "",
+    currentRoute: selectedRoute,
+    riskByEdge,
+    onRouteUpdated: handleRouteUpdated,
+  });
+
+  // Auto-dismiss the ROUTE UPDATED toast after a few seconds, per
+  // ANIMATED_EFFECTS.md §3 ("a short ROUTE UPDATED toast/badge").
+  useEffect(() => {
+    if (!routeUpdateNotice) return;
+    const t = setTimeout(() => setRouteUpdateNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [routeUpdateNotice]);
 
   // ── Phase 5: Accident Simulation & Dynamic Rerouting ─────────────────────
   const handleSimulateAccident = async (
@@ -203,6 +250,20 @@ export default function HomePage() {
             <span className="text-[10px] font-bold bg-sky-200/60 text-sky-800 px-2 py-0.5 rounded">
               Route Optimization Active
             </span>
+          </div>
+        )}
+
+        {/* ROUTE UPDATED — only ever fires from a real backend re-evaluation
+            (hooks/useRouteReoptimization.ts), never speculatively */}
+        {routeUpdateNotice && (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs font-semibold text-emerald-900 flex items-center justify-between shadow-xs animate-pulse">
+            <div className="flex items-center gap-2">
+              <RefreshCw className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>
+                <strong>ROUTE UPDATED</strong> — {Math.round(routeUpdateNotice.previousEtaMinutes)} min →{" "}
+                {Math.round(routeUpdateNotice.nextEtaMinutes)} min. {routeUpdateNotice.reason}
+              </span>
+            </div>
           </div>
         )}
 
