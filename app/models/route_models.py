@@ -49,8 +49,26 @@ class CandidateRoute(BaseModel):
     congestion_level: CongestionLevel
     edges: List[str]
     coords: List[Coordinate]
+    # Real OSM street names traversed, in order, deduped of consecutive
+    # repeats — empty entries (unnamed edges) omitted. Never fabricated;
+    # "" throughout only if the graph itself has no real names loaded
+    # (i.e. running on the synthetic fallback grid).
+    road_names: List[str] = []
 
 
 class RouteResponse(BaseModel):
     request_id: str
     routes: List[CandidateRoute]
+
+
+class LocationSuggestion(BaseModel):
+    """A real, searchable FROM/TO point — a real OSM street name found in
+    the loaded network, not a geocoded or invented place."""
+
+    name: str
+    lat: float
+    lng: float
+
+
+class LocationsResponse(BaseModel):
+    locations: List[LocationSuggestion]

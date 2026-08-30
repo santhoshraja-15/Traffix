@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.utils.logging import get_logger
 
@@ -51,6 +51,10 @@ class RealEdge:
     speed_limit_kmh: float
     lane_count: int
     shape: List[Tuple[float, float]]  # [(lng, lat), ...] — full geometry, not just endpoints
+    # Real OSM street name, when netconvert kept one (~44% of edges in the
+    # Anna Nagar network do) — e.g. "Park Road", "Thiruvalluvar Street".
+    # Empty string when the edge has none; never invented.
+    name: str = ""
 
 
 @dataclass
@@ -137,6 +141,7 @@ def load_real_network(net_path: Path = DEFAULT_NET_PATH) -> RealNetwork:
                 speed_limit_kmh=float(sumo_edge.getSpeed()) * 3.6,
                 lane_count=int(sumo_edge.getLaneNumber()),
                 shape=shape_lonlat,
+                name=sumo_edge.getName() or "",
             )
         )
 
@@ -163,6 +168,34 @@ def load_real_network(net_path: Path = DEFAULT_NET_PATH) -> RealNetwork:
         bbox[0], bbox[2], bbox[1], bbox[3],
     )
     return RealNetwork(nodes=nodes, edges=edges, bbox=bbox, net=net)
+
+
+def get_named_locations(net_path: Path = DEFAULT_NET_PATH) -> List[Dict[str, float | str]]:
+    """
+    Real, searchable FROM/TO locations — one entry per unique real OSM street
+    name found in the network, at the average midpoint of every edge sharing
+    that name. Never invents a place name: if the real network has none
+    (e.g. it failed to load), returns an empty list.
+    """
+    real = get_real_network(net_path)
+    if real is None:
+        return []
+
+    by_name: Dict[str, List[Tuple[float, float]]] = {}
+    for edge in real.edges:
+        if not edge.name:
+            continue
+        mid = edge.shape[len(edge.shape) // 2] if edge.shape else None
+        if mid is None:
+            continue
+        by_name.setdefault(edge.name, []).append(mid)
+
+    locations: List[Dict[str, float | str]] = []
+    for name, points in sorted(by_name.items()):
+        avg_lng = sum(p[0] for p in points) / len(points)
+        avg_lat = sum(p[1] for p in points) / len(points)
+        locations.append({"name": name, "lat": avg_lat, "lng": avg_lng})
+    return locations
 
 
 def get_real_network(net_path: Path = DEFAULT_NET_PATH) -> Optional[RealNetwork]:

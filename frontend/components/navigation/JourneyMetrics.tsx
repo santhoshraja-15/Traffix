@@ -9,12 +9,12 @@ interface JourneyMetricsProps {
 
 export default function JourneyMetrics({ metrics }: JourneyMetricsProps) {
   const {
-    distanceCoveredKm = 1.4,
-    timeTakenMinutes = 4,
-    distanceLeftKm = 2.8,
-    timeLeftMinutes = 8,
-    estimatedReachingTime = "17:05",
-    currentSpeedKmh = 38.5,
+    distanceCoveredKm = 0,
+    timeTakenMinutes = 0,
+    distanceLeftKm = 0,
+    timeLeftMinutes = 0,
+    estimatedReachingTime = "—",
+    currentSpeedKmh = 0,
   } = metrics;
 
   return (

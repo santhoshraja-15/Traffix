@@ -1,6 +1,34 @@
 import { GeoCoordinates } from "./common";
 import { CongestionLevel } from "./traffic";
 
+// ── Real backend contract (app/models/route_models.py) ───────────────────────
+// Raw shapes as the API actually returns them — kept separate from the
+// frontend display type below (RouteOption) per TECHNICAL_DEEP_DIVE.md §3's
+// adapter-layer guidance. Normalization happens in services/navigationApi.ts.
+
+export interface ApiCandidateRoute {
+  route_id: string;
+  rank: number;
+  travel_time: number; // seconds
+  distance: number; // meters
+  traffic_level: number; // 0.0-1.0
+  congestion_level: "free_flow" | "light" | "moderate" | "heavy" | "severe";
+  edges: string[];
+  coords: GeoCoordinates[];
+  road_names: string[];
+}
+
+export interface ApiRouteResponse {
+  request_id: string;
+  routes: ApiCandidateRoute[];
+}
+
+export interface LocationSuggestion {
+  name: string;
+  lat: number;
+  lng: number;
+}
+
 export interface RouteOption {
   id: string;
   name: string;

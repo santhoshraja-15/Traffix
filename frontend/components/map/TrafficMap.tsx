@@ -31,6 +31,11 @@ const TOPOLOGY_SOURCE = "anna-nagar-network";
 const TOPOLOGY_LAYER = "anna-nagar-roads";
 const VEHICLES_SOURCE = "live-vehicles";
 const VEHICLES_LAYER = "live-vehicles-dots";
+const ROUTE_SOURCE = "active-route";
+const ROUTE_LAYER = "active-route-line";
+// Distinct from the risk-severity palette (green/amber/orange/red) per
+// DESIGN_SYSTEM.md §3 — one clear accent for the active recommended route.
+const ROUTE_COLOR = "#0ea5e9";
 
 interface TrafficMapProps {
   activeRoute?: RouteOption;
@@ -44,6 +49,25 @@ interface TrafficMapProps {
    * component smooths motion between updates but never invents a vehicle. */
   vehicles?: StreamVehicle[];
   onBaselineReady?: () => void;
+}
+
+function routeToGeoJSON(route: RouteOption | undefined): FeatureCollection {
+  if (!route || route.coordinates.length < 2) {
+    return { type: "FeatureCollection", features: [] };
+  }
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        properties: { id: route.id },
+        geometry: {
+          type: "LineString",
+          coordinates: route.coordinates.map((c) => [c.lng, c.lat]),
+        },
+      },
+    ],
+  };
 }
 
 function vehiclesToGeoJSON(vehicles: ReturnType<typeof useVehicleInterpolation>): FeatureCollection {
@@ -214,6 +238,24 @@ export default function TrafficMap({
             });
           }
 
+          if (!map.current.getSource(ROUTE_SOURCE)) {
+            map.current.addSource(ROUTE_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: ROUTE_LAYER,
+              type: "line",
+              source: ROUTE_SOURCE,
+              layout: { "line-cap": "round", "line-join": "round" },
+              paint: {
+                "line-width": 5,
+                "line-color": ROUTE_COLOR,
+                "line-opacity": 0.95,
+              },
+            });
+          }
+
           if (!map.current.getSource(VEHICLES_SOURCE)) {
             map.current.addSource(VEHICLES_SOURCE, {
               type: "geojson",
@@ -294,6 +336,15 @@ export default function TrafficMap({
     source.setData(vehiclesToGeoJSON(interpolatedVehicles));
   }, [interpolatedVehicles]);
 
+  // The active route's real geometry (resolved by the backend against the
+  // real network graph — see app/services/routing_service.py), never a
+  // straight line or a client-side recomputation.
+  useEffect(() => {
+    const source = map.current?.getSource(ROUTE_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(routeToGeoJSON(activeRoute));
+  }, [activeRoute]);
+
   const bounds = topology ? boundsFromTopology(topology) : null;
   const live = Object.keys(riskByEdge).length > 0;
 
@@ -345,6 +396,22 @@ export default function TrafficMap({
                 />
               );
             })}
+          {layers.routes && activeRoute && bounds && activeRoute.coordinates.length >= 2 && (
+            <path
+              d={activeRoute.coordinates
+                .map((c, i) => {
+                  const { x, y } = projectToViewBox(c.lng, c.lat, bounds, SVG_W, SVG_H);
+                  return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+                })
+                .join(" ")}
+              fill="none"
+              stroke={ROUTE_COLOR}
+              strokeWidth={4}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity={0.95}
+            />
+          )}
           {layers.vehicles && bounds && (
             <VehicleLayer vehicles={interpolatedVehicles} bounds={bounds} width={SVG_W} height={SVG_H} />
           )}

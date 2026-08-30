@@ -30,6 +30,9 @@ class RoadNetworkGraph:
     def __init__(self) -> None:
         self.graph: nx.DiGraph = nx.DiGraph()
         self._initialized = False
+        # edge_id -> real OSM street name, built once when the real network
+        # loads; empty for the synthetic fallback (it has no real names).
+        self._edge_name_by_id: Dict[str, str] = {}
         # "sumo_network" (real Anna Nagar geometry) or "synthetic_fallback"
         # (placeholder grid, used only if the real network fails to load) —
         # exposed via to_geojson() metadata so the frontend can tell honestly
@@ -65,6 +68,7 @@ class RoadNetworkGraph:
     def _initialize_from_real_network(self, real: RealNetwork) -> None:
         """Build the graph from real SUMO node/edge geometry — one edge per SUMO edge."""
         self.graph = nx.DiGraph()
+        self._edge_name_by_id = {}
 
         for node in real.nodes:
             self.graph.add_node(node.node_id, lat=node.lat, lng=node.lng)
@@ -97,7 +101,11 @@ class RoadNetworkGraph:
                 # [(lng, lat), ...] — full real geometry, used by to_geojson()
                 # instead of a straight line between the two endpoint nodes.
                 shape=edge.shape,
+                # Real OSM street name, "" when netconvert kept none for this edge.
+                name=edge.name,
             )
+            if edge.name:
+                self._edge_name_by_id[edge.edge_id] = edge.name
 
         self._initialized = True
         self._source = "sumo_network"
@@ -238,6 +246,10 @@ class RoadNetworkGraph:
         if not self.graph.has_edge(u, v):
             return None
         return dict(self.graph[u][v])
+
+    def get_edge_name(self, edge_id: str) -> str:
+        """Real OSM street name for *edge_id*, or "" if it has none/graph is synthetic."""
+        return self._edge_name_by_id.get(edge_id, "")
 
     def get_node_coord(self, node_id: str) -> Optional[Tuple[float, float]]:
         if not self.graph.has_node(node_id):

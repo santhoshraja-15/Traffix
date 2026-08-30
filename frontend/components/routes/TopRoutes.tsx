@@ -2,7 +2,6 @@
 
 import { RouteOption } from "../../types/route";
 import { Star, Clock, MapPin, ShieldAlert, CheckCircle } from "lucide-react";
-import { MOCK_ROUTES } from "../../lib/mockData";
 
 interface TopRoutesProps {
   routes?: RouteOption[];
@@ -11,8 +10,8 @@ interface TopRoutesProps {
 }
 
 export default function TopRoutes({
-  routes = MOCK_ROUTES,
-  selectedRouteId = "route-1",
+  routes = [],
+  selectedRouteId,
   onSelectRoute,
 }: TopRoutesProps) {
 
@@ -54,6 +53,11 @@ export default function TopRoutes({
       </div>
 
       {/* Route List Items */}
+      {routes.length === 0 ? (
+        <div className="px-2 py-4 text-center text-[11px] text-slate-400 font-semibold">
+          No route yet — search a destination above.
+        </div>
+      ) : (
       <div className="flex flex-col gap-1.5">
         {routes.map((route) => {
           const isSelected = selectedRouteId === route.id;
@@ -86,7 +90,7 @@ export default function TopRoutes({
 
               {/* Time */}
               <div className="col-span-2 text-center font-extrabold text-xs text-slate-800">
-                {route.etaMinutes} <span className="text-[10px] text-slate-500 font-normal">min</span>
+                {Math.round(route.etaMinutes)} <span className="text-[10px] text-slate-500 font-normal">min</span>
               </div>
 
               {/* Traffic Density */}
@@ -102,6 +106,7 @@ export default function TopRoutes({
           );
         })}
       </div>
+      )}
 
     </div>
   );

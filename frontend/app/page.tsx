@@ -31,11 +31,12 @@ import { CheckCircle2, ShieldAlert } from "lucide-react";
 
 export default function HomePage() {
   const [mode, setMode] = useState<ApplicationMode>("simulation");
-  const [routes, setRoutes] = useState<RouteOption[]>(MOCK_ROUTES);
-  const [selectedRoute, setSelectedRoute] = useState<RouteOption>(MOCK_ROUTES[0]);
+  const [routes, setRoutes] = useState<RouteOption[]>([]);
+  const [selectedRoute, setSelectedRoute] = useState<RouteOption | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [searchStepText, setSearchStepText] = useState("");
   const [shortestRouteNotice, setShortestRouteNotice] = useState<string | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [accident, setAccident] = useState<Accident | null>(null);
   const [ambulance, setAmbulance] = useState<Ambulance | null>(null);
   const [showComparison, setShowComparison] = useState(false);
@@ -63,58 +64,48 @@ export default function HomePage() {
       });
   }, [mapReady]);
 
-  // ── Phase 4: Route Optimization Workflow ─────────────────────────────────
+  // ── FROM/TO routing — real backend request, no scripted/fake steps ───────
   const handleSearch = async (origin: string, destination: string) => {
     setIsSearching(true);
     setShortestRouteNotice(null);
+    setSearchError(null);
+    setSearchStepText("Finding shortest route...");
 
-    setSearchStepText("Step 1/3: Mapping locations to SUMO network nodes...");
-    pushMessage({
-      id: `msg-${Date.now()}-1`,
-      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: "info",
-      text: `Resolving locations: ${origin} → ${destination}`,
-      details: "Mapping geographic coordinates to SUMO edge IDs...",
-    });
-
-    setTimeout(() => {
-      setSearchStepText("Step 2/3: Shortest topological path found...");
-      setShortestRouteNotice("Shortest topological route found: 4.2 km (~12 min)");
-      pushMessage({
-        id: `msg-${Date.now()}-2`,
-        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type: "routing",
-        text: "Shortest Route Found",
-        details: "Topological shortest path calculated via Anna Salai Direct.",
-      });
-    }, 600);
-
-    setTimeout(() => {
-      setSearchStepText("Step 3/3: Evaluating XGBoost risk & live TraCI traffic...");
-      pushMessage({
-        id: `msg-${Date.now()}-3`,
-        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type: "system",
-        text: "Analyzing Live Traffic & XGBoost Risk...",
-        details: "Evaluating congestion, speed vectors, and risk exposure scores.",
-      });
-    }, 1200);
-
-    setTimeout(async () => {
-      const result = await calculateRoutes(origin, destination);
+    try {
+      const result = await calculateRoutes(origin, destination, riskByEdge);
       setRoutes(result.optimalRoutes);
       setSelectedRoute(result.recommendedRoute);
       setShowComparison(true);
-
+      setShortestRouteNotice(
+        `Route found: ${result.recommendedRoute.distanceKm.toFixed(1)} km (~${Math.round(
+          result.recommendedRoute.etaMinutes
+        )} min)`
+      );
       pushMessage({
-        id: `msg-${Date.now()}-4`,
+        id: `msg-${Date.now()}-route`,
         timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
         type: "success",
         text: "Optimal Route Selected: " + result.recommendedRoute.name,
         details: result.recommendedRoute.reasoning,
       });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Route request failed.";
+      setSearchError(message);
+      setRoutes([]);
+      setSelectedRoute(null);
+      setShowComparison(false);
+      pushMessage({
+        id: `msg-${Date.now()}-err`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "warning",
+        text: "Route request failed",
+        details: message,
+        urgent: true,
+      });
+    } finally {
+      setSearchStepText("");
       setIsSearching(false);
-    }, 1800);
+    }
   };
 
   // ── Phase 5: Accident Simulation & Dynamic Rerouting ─────────────────────
@@ -215,6 +206,14 @@ export default function HomePage() {
           </div>
         )}
 
+        {/* Route Search Error — real backend/validation failures, never a silent fallback */}
+        {searchError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs font-semibold text-red-900 flex items-center gap-2 shadow-xs">
+            <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{searchError}</span>
+          </div>
+        )}
+
         {/* Active Accident Alert Banner */}
         {accident && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs font-semibold text-red-900 flex items-center justify-between shadow-xs animate-pulse">
@@ -234,7 +233,7 @@ export default function HomePage() {
         {showComparison && (
           <RouteComparison
             routes={routes}
-            activeRouteId={selectedRoute.id}
+            activeRouteId={selectedRoute?.id}
             onSelectRoute={(r) => setSelectedRoute(r)}
           />
         )}
@@ -248,7 +247,7 @@ export default function HomePage() {
 
             <div className="h-[520px] w-full relative shadow-sm rounded-b-xl">
               <TrafficMap
-                activeRoute={selectedRoute}
+                activeRoute={selectedRoute ?? undefined}
                 accident={accident}
                 ambulance={ambulance}
                 isNavigating={true}
@@ -258,16 +257,23 @@ export default function HomePage() {
               />
             </div>
 
-            <JourneyMetrics
-              metrics={{
-                distanceCoveredKm: 1.4,
-                timeTakenMinutes: 4,
-                distanceLeftKm: Math.max(0, selectedRoute.distanceKm - 1.4),
-                timeLeftMinutes: Math.max(0, selectedRoute.etaMinutes - 4),
-                estimatedReachingTime: "17:05",
-                currentSpeedKmh: selectedRoute.averageSpeedKmh,
-              }}
-            />
+            {/* Only shown once a real route exists — "covered so far" is
+                honestly 0 (a route was just computed, nothing driven yet);
+                there's no active-journey tracking to report otherwise. */}
+            {selectedRoute && (
+              <JourneyMetrics
+                metrics={{
+                  distanceCoveredKm: 0,
+                  timeTakenMinutes: 0,
+                  distanceLeftKm: selectedRoute.distanceKm,
+                  timeLeftMinutes: Math.round(selectedRoute.etaMinutes),
+                  estimatedReachingTime: new Date(
+                    Date.now() + selectedRoute.etaMinutes * 60_000
+                  ).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false }),
+                  currentSpeedKmh: selectedRoute.averageSpeedKmh,
+                }}
+              />
+            )}
           </div>
 
           {/* RIGHT: Live Messages, Accident Panel, Routes, Congestion, Legend */}
@@ -282,7 +288,7 @@ export default function HomePage() {
 
             <TopRoutes
               routes={routes}
-              selectedRouteId={selectedRoute.id}
+              selectedRouteId={selectedRoute?.id}
               onSelectRoute={(r) => setSelectedRoute(r)}
             />
 

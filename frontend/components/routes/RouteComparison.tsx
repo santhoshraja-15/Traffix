@@ -59,7 +59,7 @@ export default function RouteComparison({
                 <div className="flex items-baseline justify-between mb-2">
                   <div className="flex items-baseline gap-1">
                     <span className="text-xl font-extrabold text-slate-900">
-                      {route.etaMinutes}
+                      {Math.round(route.etaMinutes)}
                     </span>
                     <span className="text-xs text-slate-500 font-medium">min</span>
                   </div>
