@@ -43,11 +43,11 @@ export default function HomePage() {
 
   const [mapReady, setMapReady] = useState(false);
 
-  // ── Live KPI: REST baseline + polling ─────────────────────────────────────
-  const { kpi, setKpi } = useLiveKpi(5000, mapReady);
-
   // ── The one app-wide WebSocket connection, owned by TraffixProvider ──────
-  const { wsConnected, wsStep, riskByEdge, vehicles: liveVehicles } = useTraffixContext();
+  const { wsConnected, wsStep, riskByEdge, edges, vehicles: liveVehicles } = useTraffixContext();
+
+  // ── Live KPI + congestion breakdown, computed from the real edge stream ──
+  const { kpi, setKpi } = useLiveKpi(edges);
 
   // ── Live intelligence message feed ────────────────────────────────────────
   const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
@@ -181,11 +181,11 @@ export default function HomePage() {
           </span>
         </div>
 
-        {/* Phase 2: Traffic KPI — now driven by live useLiveKpi */}
+        {/* Traffic KPI overview — computed live from the real WebSocket edge stream */}
         <TrafficKpiOverview
           vehicleCount={kpi.activeVehicles}
           averageSpeedKmh={kpi.avgSpeedKmh}
-          stoppedVehicles={accident ? 28 : 12}
+          stoppedVehicles={kpi.stoppedVehicles}
           networkHealthIndex={kpi.networkHealthPct}
           activeIncidentsCount={kpi.activeIncidents}
         />
@@ -293,10 +293,10 @@ export default function HomePage() {
             />
 
             <CongestionBreakdown
-              lowCount={accident ? 20 : 26}
-              moderateCount={8}
-              highCount={accident ? 7 : 3}
-              congestedCount={accident ? 3 : 1}
+              lowCount={kpi.lowCount}
+              moderateCount={kpi.moderateCount}
+              highCount={kpi.highCount}
+              congestedCount={kpi.congestedCount}
             />
 
             <LegendPanel />

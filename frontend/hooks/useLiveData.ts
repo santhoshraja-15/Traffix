@@ -1,39 +1,23 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { fetchNetworkKpi, NetworkKpi } from "../services/trafficApi";
+import type { StreamEdge } from "./useWebSocket";
+import { computeTrafficAggregates, TrafficAggregates } from "../lib/trafficAggregates";
 
-// ── Live KPI hook — REST baseline + polling ───────────────────────────────────
-// Previously also merged in delta updates from services/webSocketClient.ts, a
-// second WebSocket client that connected to a nonexistent endpoint and
-// silently fabricated data when it failed. That client has been retired
-// (see TraffixContext.tsx) — this hook is now honestly what it does: a
-// polled REST fetch. Live per-edge data flows through the real socket via
-// useTraffixContext()/useSimulationStream instead.
-export function useLiveKpi(pollingIntervalMs = 5000, enabled = true) {
-  const [kpi, setKpi] = useState<NetworkKpi>({
-    activeVehicles: 1247,
-    avgSpeedKmh: 34.2,
-    networkHealthPct: 88,
-    activeIncidents: 0,
-    throughputVehPerHr: 1820,
-    congestionIndex: 0.62,
-  });
+// ── Live KPI hook — computed from the real WebSocket edge stream ─────────────
+// Previously polled a /traffic/kpi REST endpoint that never existed on the
+// backend and silently fell back to hardcoded numbers. There's no need for
+// a dedicated aggregate endpoint at all: the real per-edge snapshot is
+// already pushed to the client every second (see TraffixContext.tsx /
+// hooks/useWebSocket.ts) — this just derives the network-wide KPIs and
+// congestion breakdown from it (lib/trafficAggregates.ts), so the panel
+// updates exactly as often as the backend actually pushes new data.
+export function useLiveKpi(edges: StreamEdge[]) {
+  const [kpi, setKpi] = useState<TrafficAggregates>(() => computeTrafficAggregates(edges));
 
-  // Initial REST fetch
   useEffect(() => {
-    if (!enabled) return;
-    fetchNetworkKpi().then(setKpi).catch(() => {/* use default */});
-  }, [enabled]);
-
-  // Polling REST fallback
-  useEffect(() => {
-    if (!enabled) return;
-    const interval = setInterval(() => {
-      fetchNetworkKpi().then(setKpi).catch(() => {/* keep last */});
-    }, pollingIntervalMs);
-    return () => clearInterval(interval);
-  }, [pollingIntervalMs, enabled]);
+    setKpi(computeTrafficAggregates(edges));
+  }, [edges]);
 
   return { kpi, setKpi };
 }

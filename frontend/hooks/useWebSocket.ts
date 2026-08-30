@@ -26,6 +26,7 @@ export interface StreamEdge {
   edge_id: string;
   speed: number;
   vehicle_count: number;
+  stopped_vehicles: number;
   congestion: string;
   congestion_score: number;
   edge_cost: number;
@@ -73,6 +74,11 @@ const RECONNECT_MAX_MS   = 30_000;
 export interface UseTrafficSocketReturn {
   connected: boolean;
   riskByEdge: EdgeRiskMap;
+  /** The full latest per-edge traffic snapshot (all StreamEdge fields, not
+   * just risk) — for aggregate panels (KPI overview, congestion breakdown)
+   * that need more than the map's paint-color value. Same 1s throttle as
+   * riskByEdge/tick. */
+  edges: StreamEdge[];
   vehicles: StreamVehicle[];
   tick: number | undefined;
 }
@@ -86,6 +92,7 @@ export interface UseTrafficSocketReturn {
 export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
   const [connected, setConnected] = useState(false);
   const [riskByEdge, setRiskByEdge] = useState<EdgeRiskMap>({});
+  const [edges, setEdges] = useState<StreamEdge[]>([]);
   const [vehicles, setVehicles] = useState<StreamVehicle[]>([]);
   const [tick, setTick] = useState<number | undefined>(undefined);
 
@@ -115,6 +122,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
         next[edge.edge_id] = edge.risk_score;
       }
       setRiskByEdge(next);
+      setEdges(payload.traffic);
       setVehicles(payload.vehicles ?? []);
       setTick(payload.tick);
     };
@@ -211,5 +219,5 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
     };
   }, [simulationId]);
 
-  return { connected, riskByEdge, vehicles, tick };
+  return { connected, riskByEdge, edges, vehicles, tick };
 }

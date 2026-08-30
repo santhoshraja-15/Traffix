@@ -37,32 +37,10 @@ export async function fetchRoadDensities(): Promise<RoadDensity[]> {
   }
 }
 
-// ── Network KPI summary ──────────────────────────────────────────────────────
-export interface NetworkKpi {
-  activeVehicles: number;
-  avgSpeedKmh: number;
-  networkHealthPct: number;
-  activeIncidents: number;
-  throughputVehPerHr: number;
-  congestionIndex: number;
-}
-
-const MOCK_KPI: NetworkKpi = {
-  activeVehicles: 1247,
-  avgSpeedKmh: 34.2,
-  networkHealthPct: 88,
-  activeIncidents: 2,
-  throughputVehPerHr: 1820,
-  congestionIndex: 0.62,
-};
-
-export async function fetchNetworkKpi(): Promise<NetworkKpi> {
-  try {
-    return await apiGet<NetworkKpi>("/traffic/kpi");
-  } catch {
-    return MOCK_KPI;
-  }
-}
+// Network-wide KPIs are computed live from the real WebSocket edge stream —
+// see lib/trafficAggregates.ts + hooks/useLiveData.ts — not fetched here.
+// (There never was a real /traffic/kpi backend endpoint; this used to call
+// one that didn't exist and silently fall back to hardcoded numbers.)
 
 // ── XGBoost risk score for a road segment ───────────────────────────────────
 export interface RiskScoreResponse {

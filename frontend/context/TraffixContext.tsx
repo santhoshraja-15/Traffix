@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useState, ReactNode } from "react";
 import { useSimulationStream } from "@/hooks/useSimulationStream";
-import type { EdgeRiskMap, StreamVehicle } from "@/hooks/useSimulationStream";
+import type { EdgeRiskMap, StreamEdge, StreamVehicle } from "@/hooks/useSimulationStream";
 
 /**
  * App-wide WebSocket connection — established exactly once here, per
@@ -22,6 +22,8 @@ interface TraffixContextValue {
   wsConnected: boolean;
   wsStep: number;
   riskByEdge: EdgeRiskMap;
+  /** Full latest per-edge traffic snapshot — see hooks/useWebSocket.ts. */
+  edges: StreamEdge[];
   vehicles: StreamVehicle[];
   unreadAlerts: number;
   setUnreadAlerts: (n: number) => void;
@@ -31,13 +33,14 @@ const TraffixContext = createContext<TraffixContextValue>({
   wsConnected: false,
   wsStep: 0,
   riskByEdge: {},
+  edges: [],
   vehicles: [],
   unreadAlerts: 5,
   setUnreadAlerts: () => {},
 });
 
 export function TraffixProvider({ children }: { children: ReactNode }) {
-  const { connected, tick, riskByEdge, vehicles } = useSimulationStream(true);
+  const { connected, tick, riskByEdge, edges, vehicles } = useSimulationStream(true);
   const [unreadAlerts, setUnreadAlerts] = useState(5);
 
   return (
@@ -46,6 +49,7 @@ export function TraffixProvider({ children }: { children: ReactNode }) {
         wsConnected: connected,
         wsStep: tick ?? 0,
         riskByEdge,
+        edges,
         vehicles,
         unreadAlerts,
         setUnreadAlerts,

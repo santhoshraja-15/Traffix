@@ -212,9 +212,14 @@ class SimulationManager:
 
             occupancy = vehicle_count / max(1.0, capacity)
             avg_speed = max(5.0, 60.0 * (1.0 - occupancy) * (1.0 - rainfall * 0.4))
+            # Mock "stopped" count — same occupancy-driven heuristic style as
+            # avg_speed above; only used when source == "mock" (see
+            # traffic_events below, which labels every entry honestly).
+            stopped_vehicles = int(vehicle_count * max(0.0, occupancy - 0.6) * 0.8)
 
             data["vehicle_count"] = int(vehicle_count)
             data["avg_speed"] = round(avg_speed, 2)
+            data["stopped_vehicles"] = stopped_vehicles
             data["rainfall"] = rainfall
 
     def _apply_sumo_metrics_to_graph(
@@ -237,6 +242,7 @@ class SimulationManager:
                 continue
             data["vehicle_count"] = m["vehicle_count"]
             data["avg_speed"] = m["average_speed_kmh"]
+            data["stopped_vehicles"] = m["stopped_vehicles"]
             data["rainfall"] = 0.0  # TraCI does not expose rainfall
 
     async def _run_simulation_loop(self, simulation_id: str) -> None:
@@ -381,6 +387,7 @@ class SimulationManager:
                             "edge_id": edge_id,
                             "speed": round(float(data.get("avg_speed", 40.0)), 1),
                             "vehicle_count": int(data.get("vehicle_count", 0)),
+                            "stopped_vehicles": int(data.get("stopped_vehicles", 0)),
                             "congestion": _congestion_label(congestion_score),
                             "congestion_score": round(congestion_score, 4),
                             "edge_cost": round(float(data.get("weight", 0.0) or 0.0), 4),
