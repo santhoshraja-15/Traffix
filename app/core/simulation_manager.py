@@ -38,6 +38,7 @@ import random
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from app.core.traffic_state import traffic_state_store
 from app.core.websocket_manager import websocket_manager
 from app.emergency.accident_manager import accident_manager
 from app.emergency.mission_manager import mission_manager
@@ -391,12 +392,27 @@ class SimulationManager:
                     congestion_score = predictions.get(
                         edge_id, float(data.get("congestion", 0.0) or 0.0)
                     )
+                    edge_speed = round(float(data.get("avg_speed", 40.0)), 1)
+                    edge_vehicle_count = int(data.get("vehicle_count", 0))
+                    # Feed the real per-tick state into traffic_state_store too
+                    # (app/core/traffic_state.py) — previously a real, correctly
+                    # -built cache that nothing ever wrote to, so every reader
+                    # (app/services/analytics_service.py, traffic_service.py)
+                    # saw it permanently empty. Same real numbers already
+                    # computed for the broadcast below, just also cached here.
+                    traffic_state_store.update(
+                        edge_id=edge_id,
+                        speed=edge_speed,
+                        vehicle_count=edge_vehicle_count,
+                        congestion_score=round(congestion_score, 4),
+                        congestion_level=CongestionLevel(_congestion_label(congestion_score)),
+                    )
                     traffic_events.append(
                         {
                             "type": UpdateType.TRAFFIC.value,
                             "edge_id": edge_id,
-                            "speed": round(float(data.get("avg_speed", 40.0)), 1),
-                            "vehicle_count": int(data.get("vehicle_count", 0)),
+                            "speed": edge_speed,
+                            "vehicle_count": edge_vehicle_count,
                             "stopped_vehicles": int(data.get("stopped_vehicles", 0)),
                             "congestion": _congestion_label(congestion_score),
                             "congestion_score": round(congestion_score, 4),
