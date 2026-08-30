@@ -45,3 +45,18 @@ class ScenarioInjectionResponse(BaseModel):
     simulation_id: str
     scenario_type: ScenarioType
     accepted: bool
+
+
+class SimulationPauseStateResponse(BaseModel):
+    """
+    Real pause/resume/step response — deliberately its own minimal shape
+    rather than reusing SimulationStatusResponse, which carries an
+    active_vehicles estimate that isn't derived from real per-tick data
+    (a pre-existing gap, out of scope for this endpoint). Every field here
+    is genuinely real: current tick count and whether the loop is paused,
+    both read straight from SimulationManager's own state.
+    """
+
+    simulation_id: str
+    paused: bool
+    tick: int

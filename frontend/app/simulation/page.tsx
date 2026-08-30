@@ -8,7 +8,13 @@ import SimulationControls from "@/components/simulation/SimulationControls";
 import AccidentPanel from "@/components/accident/AccidentPanel";
 import { useTraffixContext } from "@/context/TraffixContext";
 import { useLiveKpi } from "@/hooks/useLiveData";
-import { startSimulation, stopSimulation } from "@/services/simulationApi";
+import {
+  startSimulation,
+  stopSimulation,
+  pauseSimulation,
+  resumeSimulation,
+  stepSimulation,
+} from "@/services/simulationApi";
 import { simulateAccident, resolveAccident } from "@/services/accidentApi";
 import { fetchNetworkTopology } from "@/services/networkApi";
 import { AccidentSeverity } from "@/types/accident";
@@ -20,14 +26,17 @@ import { Cpu, ShieldAlert, ArrowRight, CheckCircle2 } from "lucide-react";
  * Audited against app/api/simulation.py, app/core/simulation_manager.py,
  * app/integrations/sumo_bridge.py, and app/integrations/sumo_network_loader.py
  * before rewriting (see the Phase 13 commit for the full write-up). Real:
- * start/stop of the one shared tick loop (the same simulation every page's
- * live data already depends on — see hooks/useWebSocket.ts, which
- * auto-starts it on first connect), and real accident injection (the same
- * AccidentPanel/backend flow already proven on the main page and
- * /emergency — not a second implementation).
+ * start/stop/pause/resume/step of the one shared tick loop (the same
+ * simulation every page's live data already depends on — see
+ * hooks/useWebSocket.ts, which auto-starts it on first connect), and real
+ * accident injection (the same AccidentPanel/backend flow already proven
+ * on the main page and /emergency — not a second implementation). Pause/
+ * resume/step were added to SimulationManager's tick loop itself (a real
+ * flag it checks every iteration) after the user explicitly approved that
+ * specific backend addition — see the Phase 13 follow-up commit.
  *
- * Confirmed NOT real, and not faked here: pause/step/speed control (no
- * such mechanism exists in SimulationManager's tick loop) and live
+ * Confirmed NOT real, and not faked here: a speed multiplier (no such
+ * mechanism exists in SimulationManager's tick loop) and live
  * scenario/network switching (app/integrations/sumo_network_loader.py and
  * sumo_bridge.py are both hardcoded to scenarios/medium — nothing reads
  * the scenarios/low, high, or congested directories that exist on disk).
@@ -38,6 +47,9 @@ export default function SimulationPage() {
 
   const [busy, setBusy] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
+  // Real — set only from the response of a real pause/resume/step call,
+  // never inferred or assumed.
+  const [paused, setPaused] = useState(false);
   const [networkEdgeCount, setNetworkEdgeCount] = useState<number | null>(null);
   const [networkArea, setNetworkArea] = useState<string | null>(null);
 
@@ -80,6 +92,8 @@ export default function SimulationPage() {
     setControlError(null);
     try {
       await startSimulation();
+      // A (re)start always begins unpaused, per SimulationManager.start().
+      setPaused(false);
     } catch (err) {
       setControlError(err instanceof Error ? err.message : "Failed to start the simulation.");
     } finally {
@@ -92,8 +106,47 @@ export default function SimulationPage() {
     setControlError(null);
     try {
       await stopSimulation();
+      setPaused(false);
     } catch (err) {
       setControlError(err instanceof Error ? err.message : "Failed to stop the simulation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handlePause = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      const result = await pauseSimulation();
+      setPaused(result.paused);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to pause the simulation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      const result = await resumeSimulation();
+      setPaused(result.paused);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to resume the simulation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleStep = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      await stepSimulation();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to step the simulation.");
     } finally {
       setBusy(false);
     }
@@ -141,10 +194,14 @@ export default function SimulationPage() {
           />
           <SimulationControls
             looksActive={looksActive}
+            paused={paused}
             busy={busy}
             error={controlError}
             onStart={handleStart}
             onStop={handleStop}
+            onPause={handlePause}
+            onResume={handleResume}
+            onStep={handleStep}
           />
         </div>
 

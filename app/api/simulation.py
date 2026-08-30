@@ -9,6 +9,7 @@ from app.core.simulation_manager import simulation_manager
 from app.models.simulation_models import (
     ScenarioInjectionResponse,
     SimulationConfig,
+    SimulationPauseStateResponse,
     SimulationStartRequest,
     SimulationStartResponse,
     SimulationStatusResponse,
@@ -74,6 +75,52 @@ async def stop_simulation(simulation_id: str) -> SimulationStatusResponse:
     )
     logger.info("Simulation %s stopped via API.", simulation_id)
     return _MOCK_SIMULATIONS[simulation_id]
+
+
+@router.post("/simulation/pause/{simulation_id}", response_model=SimulationPauseStateResponse)
+async def pause_simulation(simulation_id: str) -> SimulationPauseStateResponse:
+    """
+    Real pause — sets a flag SimulationManager's own tick loop checks every
+    iteration (see app/core/simulation_manager.py). While paused: no TraCI/
+    mock step, no ML inference, no broadcast, no tick advance. 404s if the
+    simulation isn't currently running rather than a silent fake success.
+    """
+    if not simulation_manager.pause(simulation_id):
+        raise HTTPException(status_code=404, detail=f"Simulation '{simulation_id}' is not running.")
+    return SimulationPauseStateResponse(
+        simulation_id=simulation_id,
+        paused=True,
+        tick=simulation_manager.tick_count(simulation_id),
+    )
+
+
+@router.post("/simulation/resume/{simulation_id}", response_model=SimulationPauseStateResponse)
+async def resume_simulation(simulation_id: str) -> SimulationPauseStateResponse:
+    """Clear the real pause flag — the tick loop resumes on its next iteration."""
+    if not simulation_manager.resume(simulation_id):
+        raise HTTPException(status_code=404, detail=f"Simulation '{simulation_id}' is not running.")
+    return SimulationPauseStateResponse(
+        simulation_id=simulation_id,
+        paused=False,
+        tick=simulation_manager.tick_count(simulation_id),
+    )
+
+
+@router.post("/simulation/step/{simulation_id}", response_model=SimulationPauseStateResponse)
+async def step_simulation(simulation_id: str) -> SimulationPauseStateResponse:
+    """
+    Real single-step — queues exactly one real tick (TraCI/mock step, ML
+    inference, broadcast, tick increment all included) to run while paused,
+    then the loop re-pauses. Meaningful only while paused; 404s if the
+    simulation isn't running at all.
+    """
+    if not simulation_manager.request_step(simulation_id):
+        raise HTTPException(status_code=404, detail=f"Simulation '{simulation_id}' is not running.")
+    return SimulationPauseStateResponse(
+        simulation_id=simulation_id,
+        paused=simulation_manager.is_paused(simulation_id),
+        tick=simulation_manager.tick_count(simulation_id),
+    )
 
 
 @router.post("/simulation/scenario", response_model=ScenarioInjectionResponse)

@@ -4,17 +4,17 @@ import { DEMO_SIMULATION_ID } from "../lib/constants";
 /**
  * Real simulation lifecycle control — audited against app/api/simulation.py
  * and app/core/simulation_manager.py (see the /simulation page rework
- * commit for the full audit). Only two real, backend-backed operations
- * exist: start and stop of the one shared tick loop every page's
- * WebSocket connection already runs against (DEMO_SIMULATION_ID) — see
- * hooks/useWebSocket.ts, which auto-starts it on first connect.
+ * commit for the full audit). Real, backend-backed operations: start,
+ * stop, pause, resume, and single-step of the one shared tick loop every
+ * page's WebSocket connection already runs against (DEMO_SIMULATION_ID) —
+ * see hooks/useWebSocket.ts, which auto-starts it on first connect.
  *
- * Deliberately NOT implemented here (confirmed to have no real backend
- * counterpart — see the audit): pause, resume, single-step, speed
- * multiplier, live scenario/network switching. Previous versions of this
- * file called nonexistent endpoints for those and silently returned a
- * fake `{ success: true }` on every failure — removed rather than kept,
- * since a fake success is worse than no button at all.
+ * Still deliberately NOT implemented here (confirmed to have no real
+ * backend counterpart — see the audit): a speed multiplier, and live
+ * scenario/network switching. A previous version of this file called
+ * nonexistent endpoints for those too and silently returned a fake
+ * `{ success: true }` on every failure — removed rather than kept, since
+ * a fake success is worse than no button at all.
  */
 
 export interface SimulationStartResult {
@@ -45,4 +45,30 @@ export interface SimulationStopResult {
  * everywhere in the app, not just this page. */
 export async function stopSimulation(): Promise<SimulationStopResult> {
   return apiPost<SimulationStopResult>(`/simulation/stop/${DEMO_SIMULATION_ID}`, {});
+}
+
+export interface SimulationPauseStateResult {
+  simulation_id: string;
+  paused: boolean;
+  tick: number;
+}
+
+/** POST /simulation/pause/{id} — real: sets a flag the tick loop itself
+ * checks every iteration. While paused, no TraCI/mock step, no ML
+ * inference, no broadcast, no tick advance — genuinely nothing happens,
+ * not a frontend-simulated pause. */
+export async function pauseSimulation(): Promise<SimulationPauseStateResult> {
+  return apiPost<SimulationPauseStateResult>(`/simulation/pause/${DEMO_SIMULATION_ID}`, {});
+}
+
+/** POST /simulation/resume/{id} — real: clears the pause flag. */
+export async function resumeSimulation(): Promise<SimulationPauseStateResult> {
+  return apiPost<SimulationPauseStateResult>(`/simulation/resume/${DEMO_SIMULATION_ID}`, {});
+}
+
+/** POST /simulation/step/{id} — real: queues exactly one real tick (full
+ * TraCI/mock step + inference + broadcast + tick increment) to run while
+ * paused, then the loop re-pauses. Only meaningful while paused. */
+export async function stepSimulation(): Promise<SimulationPauseStateResult> {
+  return apiPost<SimulationPauseStateResult>(`/simulation/step/${DEMO_SIMULATION_ID}`, {});
 }

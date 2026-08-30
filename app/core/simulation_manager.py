@@ -76,6 +76,17 @@ class SimulationManager:
         self._tick_counts: Dict[str, int] = {}
         # Track the config each simulation was started with (used for rainfall etc.).
         self._configs: Dict[str, SimulationConfig] = {}
+        # Real pause state — checked at the top of every loop iteration (see
+        # _run_simulation_loop). While paused, the loop skips TraCI/mock
+        # mutation, ML inference, and broadcasting entirely — no tick
+        # advances and no data is sent, same honest "silence = not
+        # progressing" signal Stop already gives (never a fabricated
+        # "paused" heartbeat with stale data pretending to be fresh).
+        self._paused: Dict[str, bool] = {}
+        # Real single-step requests — each call to request_step() lets
+        # exactly one full, real tick through while paused, then the loop
+        # re-pauses on the next iteration.
+        self._step_requests: Dict[str, int] = {}
         # V15 ML engine injected from main.py lifespan so the tick loop can
         # call predict() without going through app.state.
         self._ml_engine = None
@@ -141,6 +152,8 @@ class SimulationManager:
 
         self._configs[simulation_id] = config
         self._tick_counts[simulation_id] = 0
+        self._paused[simulation_id] = False
+        self._step_requests[simulation_id] = 0
 
         task: asyncio.Task[None] = asyncio.create_task(
             self._run_simulation_loop(simulation_id),
@@ -158,6 +171,45 @@ class SimulationManager:
             logger.info("Simulation %s cancelled.", simulation_id)
         self._tick_counts.pop(simulation_id, None)
         self._configs.pop(simulation_id, None)
+        self._paused.pop(simulation_id, None)
+        self._step_requests.pop(simulation_id, None)
+
+    def pause(self, simulation_id: str) -> bool:
+        """
+        Real pause — sets a flag the tick loop itself checks (see
+        _run_simulation_loop). Returns False if *simulation_id* isn't
+        currently running rather than silently "succeeding".
+        """
+        if simulation_id not in self._tasks:
+            return False
+        self._paused[simulation_id] = True
+        logger.info("Simulation %s paused.", simulation_id)
+        return True
+
+    def resume(self, simulation_id: str) -> bool:
+        """Clear the pause flag so the tick loop resumes on its next iteration."""
+        if simulation_id not in self._tasks:
+            return False
+        self._paused[simulation_id] = False
+        logger.info("Simulation %s resumed.", simulation_id)
+        return True
+
+    def request_step(self, simulation_id: str) -> bool:
+        """
+        Let exactly one real tick through while paused — the loop consumes
+        this on its next iteration, runs one full real tick (TraCI/mock
+        step, prediction, broadcast, tick increment included), then
+        re-pauses. Only meaningful while paused; harmless (and a no-op in
+        practice) otherwise since a running loop never checks this flag.
+        """
+        if simulation_id not in self._tasks:
+            return False
+        self._step_requests[simulation_id] = self._step_requests.get(simulation_id, 0) + 1
+        logger.info("Simulation %s: single step requested.", simulation_id)
+        return True
+
+    def is_paused(self, simulation_id: str) -> bool:
+        return self._paused.get(simulation_id, False)
 
     def stop_all(self) -> None:
         """Cancel every active simulation — called during server shutdown."""
@@ -289,6 +341,26 @@ class SimulationManager:
 
         try:
             while True:
+                # ── Real pause / single-step ──────────────────────────────
+                # Checked at the very top of every iteration. While paused
+                # with no step requested: no TraCI/mock step, no ML
+                # inference, no broadcast, no tick advance — the same
+                # honest silence a stopped simulation already gives (never
+                # a fabricated "paused" heartbeat with stale data
+                # presented as fresh). A queued step request lets exactly
+                # one full, real tick run below, then the loop finds
+                # itself still paused on the next iteration.
+                if self._paused.get(simulation_id, False):
+                    if self._step_requests.get(simulation_id, 0) > 0:
+                        self._step_requests[simulation_id] -= 1
+                        logger.info(
+                            "Simulation %s: running one real tick for a queued step request.",
+                            simulation_id,
+                        )
+                    else:
+                        await asyncio.sleep(0.25)
+                        continue
+
                 tick = self._tick_counts[simulation_id]
                 sumo_active = bridge is not None and bridge.is_connected
                 data_source = "sumo" if sumo_active else "mock"
