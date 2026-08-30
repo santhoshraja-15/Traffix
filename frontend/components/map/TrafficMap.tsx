@@ -6,7 +6,22 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM, DEFAULT_MAP_PITCH, MAPBOX_TOKEN } from "@/lib/constants";
 import { RouteOption, LocationSuggestion } from "@/types/route";
 import type { FeatureCollection } from "geojson";
-import { boundsFromTopology, NetworkTopology, TopologyFeature, projectToViewBox, riskToColor } from "@/lib/map";
+import {
+  boundsFromTopology,
+  NetworkTopology,
+  TopologyFeature,
+  projectToViewBox,
+  riskToColor,
+  GeoBounds,
+  CameraState,
+  clampScale,
+  centerOfBounds,
+  baseSpanForAspect,
+  computeViewBounds,
+  unprojectFromViewBox,
+  boundsFromPoints,
+  scaleToFit,
+} from "@/lib/map";
 import { fetchNetworkTopology } from "@/services/networkApi";
 import { fetchRealHospitals } from "@/services/ambulanceApi";
 import { EdgeRiskMap, StreamAccident, StreamMission, StreamVehicle } from "@/hooks/useSimulationStream";
@@ -86,15 +101,29 @@ function accidentsToGeoJSON(accidents: StreamAccident[]): FeatureCollection {
 // accident — its actual full geometry (not a straight line, not just the
 // point marker), looked up from the already-loaded real network topology
 // by the accident's own edge_id.
+interface AccidentCorridorEntry {
+  accidentId: string;
+  feature: TopologyFeature;
+}
+
+// Keyed by accident_id, not edge_id: two independent real accidents can
+// legitimately land on the same edge (confirmed live — placing two
+// accidents on one edge during testing produced a real React "duplicate
+// key" warning when this was keyed by edge_id alone, which per React's own
+// warning risks elements being silently duplicated/omitted on update).
+// accident_id is unique per accident by construction, edge_id is not.
 function getAccidentCorridorFeatures(
   accidents: StreamAccident[],
   topology: NetworkTopology | null
-): TopologyFeature[] {
+): AccidentCorridorEntry[] {
   if (!topology) return [];
   const byEdgeId = new Map(topology.features.map((f) => [f.properties.edge_id, f]));
   return accidents
-    .map((a) => byEdgeId.get(a.edge_id))
-    .filter((f): f is TopologyFeature => f !== undefined);
+    .map((a) => {
+      const feature = byEdgeId.get(a.edge_id);
+      return feature ? { accidentId: a.accident_id, feature } : undefined;
+    })
+    .filter((entry): entry is AccidentCorridorEntry => entry !== undefined);
 }
 
 function accidentCorridorsToGeoJSON(
@@ -103,10 +132,10 @@ function accidentCorridorsToGeoJSON(
 ): FeatureCollection {
   return {
     type: "FeatureCollection",
-    features: getAccidentCorridorFeatures(accidents, topology).map((f) => ({
+    features: getAccidentCorridorFeatures(accidents, topology).map(({ accidentId, feature }) => ({
       type: "Feature" as const,
-      properties: { edge_id: f.properties.edge_id },
-      geometry: f.geometry,
+      properties: { edge_id: feature.properties.edge_id, accident_id: accidentId },
+      geometry: feature.geometry,
     })),
   };
 }
@@ -200,6 +229,7 @@ export default function TrafficMap({
   onBaselineReady,
 }: TrafficMapProps) {
   const mapContainer = useRef<HTMLDivElement>(null);
+  const outerRef = useRef<HTMLDivElement>(null);
   const map = useRef<mapboxgl.Map | null>(null);
   const baselineNotified = useRef(false);
   const [hasToken, setHasToken] = useState(false);
@@ -208,6 +238,24 @@ export default function TrafficMap({
   const topologyRef = useRef<NetworkTopology | null>(null);
   topologyRef.current = topology;
   const [hospitals, setHospitals] = useState<LocationSuggestion[]>([]);
+
+  // ── SVG-fallback camera (pan/zoom) — see lib/map.ts's "Interactive camera"
+  // section. Only used when !hasToken; Mapbox owns its own real camera
+  // natively when a real token is configured. `scale=1` == fit-to-network.
+  const [camera, setCamera] = useState<CameraState | null>(null);
+  const cameraRef = useRef<CameraState | null>(null);
+  cameraRef.current = camera;
+  const cameraInitialized = useRef(false);
+  // The map panel's real on-screen size — measured (not assumed) so the
+  // rendered view genuinely fills the panel instead of being letterboxed
+  // inside a fixed-aspect-ratio box unrelated to the real container.
+  const [containerSize, setContainerSize] = useState({ width: SVG_W, height: SVG_H });
+  const containerSizeRef = useRef(containerSize);
+  containerSizeRef.current = containerSize;
+  // Which route we already auto-framed — a route "selected" event should
+  // fit it into view exactly once, then leave the user's own subsequent
+  // pan/zoom alone (never fight manual camera control on every re-render).
+  const lastFitRouteId = useRef<string | undefined>(undefined);
 
   // Real, continuously-interpolated vehicle positions (ANIMATED_EFFECTS.md §2).
   const interpolatedVehicles = useVehicleInterpolation(vehicles);
@@ -240,14 +288,254 @@ export default function TrafficMap({
   };
 
   const handleResetCamera = () => {
-    if (map.current) {
+    if (hasToken && map.current) {
       map.current.flyTo({
         center: [DEFAULT_MAP_CENTER.lng, DEFAULT_MAP_CENTER.lat],
         zoom: DEFAULT_MAP_ZOOM,
         pitch: DEFAULT_MAP_PITCH,
         bearing: 0,
       });
+      return;
     }
+    // SVG-fallback mode: previously a no-op (map.current is never created
+    // without a real Mapbox token, so this whole handler silently did
+    // nothing) — now genuinely resets to a fresh fit-to-network view.
+    if (topologyRef.current) {
+      const nb = boundsFromTopology(topologyRef.current);
+      const c = centerOfBounds(nb);
+      setCamera({ lng: c.lng, lat: c.lat, scale: 1 });
+    }
+  };
+
+  // Measure the map panel's REAL on-screen size (not assumed) so the SVG
+  // view fills it exactly — fixes the fixed-1000x720-viewBox letterboxing
+  // that previously wasted real panel space whenever the panel's actual
+  // aspect ratio wasn't ~1.39:1.
+  useEffect(() => {
+    const el = outerRef.current;
+    if (!el) return;
+    const update = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setContainerSize({ width: rect.width, height: rect.height });
+      }
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Initial camera: fit the whole real network once it loads — "the map
+  // must initially frame the Anna Nagar network appropriately." A ref guard
+  // (matching baselineNotified's pattern above) rather than a state
+  // dependency, so this fires exactly once and never re-overrides a camera
+  // the user has since panned/zoomed.
+  useEffect(() => {
+    if (cameraInitialized.current || !topology) return;
+    cameraInitialized.current = true;
+    const nb = boundsFromTopology(topology);
+    const c = centerOfBounds(nb);
+    setCamera({ lng: c.lng, lat: c.lat, scale: 1 });
+  }, [topology]);
+
+  // When a NEW route is selected, automatically fit it into view — once per
+  // route id, so a manual pan/zoom afterward is never fought on re-render.
+  useEffect(() => {
+    if (!activeRoute || activeRoute.coordinates.length < 2) {
+      if (!activeRoute) lastFitRouteId.current = undefined;
+      return;
+    }
+    if (lastFitRouteId.current === activeRoute.id) return;
+    lastFitRouteId.current = activeRoute.id;
+
+    const routeBounds = boundsFromPoints(
+      activeRoute.coordinates.map((c) => ({ lng: c.lng, lat: c.lat }))
+    );
+    if (!routeBounds) return;
+
+    if (hasToken && map.current) {
+      map.current.fitBounds(
+        [
+          [routeBounds.minLng, routeBounds.minLat],
+          [routeBounds.maxLng, routeBounds.maxLat],
+        ],
+        { padding: 60, duration: 800 }
+      );
+      return;
+    }
+
+    if (!topologyRef.current) return;
+    const nb = boundsFromTopology(topologyRef.current);
+    const aspect = containerSizeRef.current.width / containerSizeRef.current.height;
+    const scale = scaleToFit(nb, routeBounds, aspect);
+    const center = centerOfBounds(routeBounds);
+    setCamera({ lng: center.lng, lat: center.lat, scale });
+  }, [activeRoute, hasToken]);
+
+  // Real pan (drag), zoom (wheel/trackpad/pinch), and double-click-zoom for
+  // the SVG-fallback map. Mapbox is already natively interactive with a
+  // real token (wheel/drag/pinch/double-click all work out of the box) —
+  // this only adds the equivalent, previously entirely-missing interaction
+  // layer to the custom SVG renderer used whenever no token is configured.
+  // Attached once (native listeners, not React's passive-by-default
+  // onWheel) and reads live camera/size/topology via refs so it never needs
+  // to re-bind on every state change.
+  useEffect(() => {
+    const el = outerRef.current;
+    if (!el || hasToken) return;
+
+    const viewBoundsNow = (): GeoBounds | null => {
+      const topo = topologyRef.current;
+      const cam = cameraRef.current;
+      if (!topo || !cam) return null;
+      const nb = boundsFromTopology(topo);
+      const { width, height } = containerSizeRef.current;
+      return computeViewBounds(nb, cam, width / height);
+    };
+
+    const zoomAt = (mx: number, my: number, factor: number) => {
+      const topo = topologyRef.current;
+      const cam = cameraRef.current;
+      const bounds = viewBoundsNow();
+      if (!topo || !cam || !bounds) return;
+      const { width, height } = containerSizeRef.current;
+      const point = unprojectFromViewBox(mx, my, bounds, width, height);
+      const newScale = clampScale(cam.scale * factor);
+      const nb = boundsFromTopology(topo);
+      const { lngSpan, latSpan } = baseSpanForAspect(nb, width / height);
+      const newLngSpan = lngSpan / newScale;
+      const newLatSpan = latSpan / newScale;
+      setCamera({
+        lng: point.lng + newLngSpan * (0.5 - mx / width),
+        lat: point.lat + newLatSpan * (my / height - 0.5),
+        scale: newScale,
+      });
+    };
+
+    // The HUD (layer toggles, zoom buttons, reset) is a React child inside
+    // this same outer container, marked with data-map-ui. A DOM ancestry
+    // check here — not React's stopPropagation — is what actually works:
+    // these are native addEventListener callbacks on an ANCESTOR of the
+    // HUD, and native bubbling reaches them before React's own root-level
+    // synthetic dispatch (and thus any stopPropagation called inside a
+    // React handler) ever runs. Without this, clicking a HUD button also
+    // starts a map drag/setPointerCapture and the click never reaches the
+    // button — confirmed live: the zoom +/- buttons silently did nothing.
+    const isMapUiTarget = (target: EventTarget | null): boolean =>
+      target instanceof Element && target.closest("[data-map-ui]") !== null;
+
+    const onWheel = (e: WheelEvent) => {
+      if (isMapUiTarget(e.target)) return;
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      // Trackpad pinch is reported as a wheel event with ctrlKey=true and a
+      // finer deltaY — a gentler exponent keeps it from feeling twitchy.
+      const intensity = e.ctrlKey ? 0.02 : 0.0018;
+      const factor = Math.exp(-e.deltaY * intensity);
+      zoomAt(mx, my, factor);
+    };
+
+    let dragPointerId: number | null = null;
+    let dragStart: { x: number; y: number; camera: CameraState; bounds: GeoBounds } | null = null;
+    const activePointers = new Map<number, { x: number; y: number }>();
+    let pinchStartDist: number | null = null;
+    let pinchStartScale = 1;
+
+    const onPointerDown = (e: PointerEvent) => {
+      if (isMapUiTarget(e.target)) return;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (activePointers.size === 1) {
+        const cam = cameraRef.current;
+        const bounds = viewBoundsNow();
+        if (!cam || !bounds) return;
+        dragPointerId = e.pointerId;
+        dragStart = { x: e.clientX, y: e.clientY, camera: cam, bounds };
+        el.setPointerCapture(e.pointerId);
+        el.style.cursor = "grabbing";
+      } else if (activePointers.size === 2) {
+        // Second finger down — switch from drag to pinch-zoom.
+        dragPointerId = null;
+        dragStart = null;
+        const pts = Array.from(activePointers.values());
+        pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        pinchStartScale = cameraRef.current?.scale ?? 1;
+      }
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!activePointers.has(e.pointerId)) return;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+      if (activePointers.size === 2 && pinchStartDist !== null) {
+        const pts = Array.from(activePointers.values());
+        const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        const midX = (pts[0].x + pts[1].x) / 2;
+        const midY = (pts[0].y + pts[1].y) / 2;
+        const rect = el.getBoundingClientRect();
+        const cam = cameraRef.current;
+        if (!cam) return;
+        const targetScale = clampScale(pinchStartScale * (dist / pinchStartDist));
+        zoomAt(midX - rect.left, midY - rect.top, targetScale / cam.scale);
+        return;
+      }
+
+      if (dragPointerId !== e.pointerId || !dragStart) return;
+      const dxScreen = e.clientX - dragStart.x;
+      const dyScreen = e.clientY - dragStart.y;
+      const { width, height } = containerSizeRef.current;
+      const lngSpan = dragStart.bounds.maxLng - dragStart.bounds.minLng;
+      const latSpan = dragStart.bounds.maxLat - dragStart.bounds.minLat;
+      setCamera({
+        lng: dragStart.camera.lng - (dxScreen / width) * lngSpan,
+        lat: dragStart.camera.lat + (dyScreen / height) * latSpan,
+        scale: dragStart.camera.scale,
+      });
+    };
+
+    const endPointer = (e: PointerEvent) => {
+      activePointers.delete(e.pointerId);
+      if (e.pointerId === dragPointerId) {
+        dragPointerId = null;
+        dragStart = null;
+        el.style.cursor = "grab";
+      }
+      if (activePointers.size < 2) pinchStartDist = null;
+    };
+
+    const onDoubleClick = (e: MouseEvent) => {
+      if (isMapUiTarget(e.target)) return;
+      const rect = el.getBoundingClientRect();
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top, 1.6);
+    };
+
+    el.style.cursor = "grab";
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    el.addEventListener("pointerup", endPointer);
+    el.addEventListener("pointercancel", endPointer);
+    el.addEventListener("dblclick", onDoubleClick);
+
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("pointermove", onPointerMove);
+      el.removeEventListener("pointerup", endPointer);
+      el.removeEventListener("pointercancel", endPointer);
+      el.removeEventListener("dblclick", onDoubleClick);
+      el.style.cursor = "";
+    };
+  }, [hasToken]);
+
+  // Discrete +/- zoom-button handler (HUD buttons) — zooms toward the
+  // current view's center rather than a cursor position.
+  const handleZoomButton = (factor: number) => {
+    const cam = cameraRef.current;
+    if (!cam) return;
+    setCamera({ ...cam, scale: clampScale(cam.scale * factor) });
   };
 
   // Load the REAL Anna Nagar network from the backend (app/routing/graph_manager.py,
@@ -576,41 +864,65 @@ export default function TrafficMap({
     source.setData(hospitalsToGeoJSON(hospitals));
   }, [hospitals]);
 
-  const bounds = topology ? boundsFromTopology(topology) : null;
+  // The full-network reference bounds (fit-to-network baseline) vs. the
+  // ACTUAL current view window (reference bounds narrowed/panned by the
+  // live camera) — every projectToViewBox call below now uses viewBounds,
+  // not the old fixed full-network bounds, so pan/zoom genuinely changes
+  // what's rendered instead of always showing the whole network at a fixed
+  // scale (the direct cause of "zooming does not appear to work").
+  const networkBounds = topology ? boundsFromTopology(topology) : null;
+  const containerAspect = containerSize.width / containerSize.height;
+  const viewBounds: GeoBounds | null =
+    networkBounds && camera ? computeViewBounds(networkBounds, camera, containerAspect) : networkBounds;
+  const bw = containerSize.width;
+  const bh = containerSize.height;
   const live = Object.keys(riskByEdge).length > 0;
 
   return (
-    <div className="relative w-full h-full min-h-[400px] bg-slate-100 rounded-b-xl overflow-hidden flex items-center justify-center border border-slate-200">
+    <div
+      ref={outerRef}
+      className="relative w-full h-full min-h-[400px] bg-slate-100 rounded-b-xl overflow-hidden flex items-center justify-center border border-slate-200"
+    >
       <HUDOverlay
         layers={layers}
         onToggleLayer={handleToggleLayer}
         onResetCamera={handleResetCamera}
+        showBuildingsToggle={hasToken}
+        onZoomIn={!hasToken ? () => handleZoomButton(1.5) : undefined}
+        onZoomOut={!hasToken ? () => handleZoomButton(1 / 1.5) : undefined}
       />
 
       <div ref={mapContainer} className="absolute inset-0 w-full h-full" />
 
       {/* SVG topology + vehicles: only when Mapbox isn't active (otherwise
-          Mapbox's own layers above already render this — no double-draw). */}
+          Mapbox's own layers above already render this — no double-draw).
+          viewBox now matches the panel's REEAL measured size (containerSize)
+          rather than a fixed 1000x720 box, so preserveAspectRatio never
+          needs to letterbox — the network fills the actual panel. Pointer
+          events are handled by the outer container (see the interaction
+          useEffect above); pointer-events stays "none" here purely so
+          hit-testing falls through to that same container rather than
+          needing every child re-annotated. */}
       {!hasToken && (
         <svg
           className="absolute inset-0 w-full h-full z-10 pointer-events-none"
-          viewBox={`0 0 ${SVG_W} ${SVG_H}`}
+          viewBox={`0 0 ${bw} ${bh}`}
           preserveAspectRatio="xMidYMid meet"
         >
-          <rect width={SVG_W} height={SVG_H} fill="#0f172a" />
+          <rect width={bw} height={bh} fill="#0f172a" />
           <defs>
             <pattern id="grid-3d" width="40" height="40" patternUnits="userSpaceOnUse">
               <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" strokeWidth="1" />
             </pattern>
           </defs>
-          <rect width={SVG_W} height={SVG_H} fill="url(#grid-3d)" />
-          {topology && bounds &&
+          <rect width={bw} height={bh} fill="url(#grid-3d)" />
+          {topology && viewBounds &&
             topology.features.map((feature) => {
               const coords = feature.geometry.coordinates;
               if (coords.length < 2) return null;
               const d = coords
                 .map(([lng, lat], i) => {
-                  const { x, y } = projectToViewBox(lng, lat, bounds, SVG_W, SVG_H);
+                  const { x, y } = projectToViewBox(lng, lat, viewBounds, bw, bh);
                   return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
                 })
                 .join(" ");
@@ -627,11 +939,11 @@ export default function TrafficMap({
                 />
               );
             })}
-          {layers.routes && activeRoute && bounds && activeRoute.coordinates.length >= 2 && (
+          {layers.routes && activeRoute && viewBounds && activeRoute.coordinates.length >= 2 && (
             <path
               d={activeRoute.coordinates
                 .map((c, i) => {
-                  const { x, y } = projectToViewBox(c.lng, c.lat, bounds, SVG_W, SVG_H);
+                  const { x, y } = projectToViewBox(c.lng, c.lat, viewBounds, bw, bh);
                   return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
                 })
                 .join(" ")}
@@ -646,7 +958,7 @@ export default function TrafficMap({
           {/* Real emergency green corridor(s) — the actual route each active
               mission is on (outbound or return), never a straight line. */}
           {layers.emergency &&
-            bounds &&
+            viewBounds &&
             missions
               .filter((m) => m.state !== "emergency_completed")
               .map((m) => {
@@ -655,7 +967,7 @@ export default function TrafficMap({
                 if (coords.length < 2) return null;
                 const d = coords
                   .map((c, i) => {
-                    const { x, y } = projectToViewBox(c.lng, c.lat, bounds, SVG_W, SVG_H);
+                    const { x, y } = projectToViewBox(c.lng, c.lat, viewBounds, bw, bh);
                     return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
                   })
                   .join(" ");
@@ -676,18 +988,18 @@ export default function TrafficMap({
               actual geometry from the loaded topology, not just a point
               marker (see accidentCorridorsToGeoJSON above). */}
           {layers.incidents &&
-            bounds &&
+            viewBounds &&
             topology &&
-            getAccidentCorridorFeatures(accidents, topology).map((f) => {
+            getAccidentCorridorFeatures(accidents, topology).map(({ accidentId, feature: f }) => {
               const d = f.geometry.coordinates
                 .map(([lng, lat], i) => {
-                  const { x, y } = projectToViewBox(lng, lat, bounds, SVG_W, SVG_H);
+                  const { x, y } = projectToViewBox(lng, lat, viewBounds, bw, bh);
                   return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
                 })
                 .join(" ");
               return (
                 <path
-                  key={f.properties.edge_id}
+                  key={accidentId}
                   d={d}
                   fill="none"
                   stroke={AFFECTED_CORRIDOR_COLOR}
@@ -699,8 +1011,8 @@ export default function TrafficMap({
                 />
               );
             })}
-          {layers.vehicles && bounds && (
-            <VehicleLayer vehicles={interpolatedVehicles} bounds={bounds} width={SVG_W} height={SVG_H} />
+          {layers.vehicles && viewBounds && (
+            <VehicleLayer vehicles={interpolatedVehicles} bounds={viewBounds} width={bw} height={bh} />
           )}
         </svg>
       )}
@@ -708,14 +1020,14 @@ export default function TrafficMap({
       {/* Real hospitals — SVG-fallback mode only, same reasoning as the
           accident/ambulance markers above. */}
       {!hasToken &&
-        bounds &&
+        viewBounds &&
         hospitals.map((h) => {
-          const { x, y } = projectToViewBox(h.lng, h.lat, bounds, SVG_W, SVG_H);
+          const { x, y } = projectToViewBox(h.lng, h.lat, viewBounds, bw, bh);
           return (
             <div
               key={h.name}
               className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-1/2"
-              style={{ left: `${(x / SVG_W) * 100}%`, top: `${(y / SVG_H) * 100}%` }}
+              style={{ left: `${(x / bw) * 100}%`, top: `${(y / bh) * 100}%` }}
             >
               <HospitalLayer name={h.name} />
             </div>
@@ -731,16 +1043,16 @@ export default function TrafficMap({
           duplicated here. */}
       {!hasToken &&
         layers.incidents &&
-        bounds &&
+        viewBounds &&
         accidents
           .filter((a) => a.lat !== null && a.lng !== null)
           .map((a) => {
-            const { x, y } = projectToViewBox(a.lng as number, a.lat as number, bounds, SVG_W, SVG_H);
+            const { x, y } = projectToViewBox(a.lng as number, a.lat as number, viewBounds, bw, bh);
             return (
               <div
                 key={a.accident_id}
                 className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-full"
-                style={{ left: `${(x / SVG_W) * 100}%`, top: `${(y / SVG_H) * 100}%` }}
+                style={{ left: `${(x / bw) * 100}%`, top: `${(y / bh) * 100}%` }}
               >
                 <RippleEffect />
                 <AccidentZone accident={a} />
@@ -752,16 +1064,16 @@ export default function TrafficMap({
           the accident markers above (native AMBULANCE_LAYER handles Mapbox). */}
       {!hasToken &&
         layers.emergency &&
-        bounds &&
+        viewBounds &&
         missions
           .filter((m) => m.state !== "emergency_completed")
           .map((m) => {
-            const { x, y } = projectToViewBox(m.lng, m.lat, bounds, SVG_W, SVG_H);
+            const { x, y } = projectToViewBox(m.lng, m.lat, viewBounds, bw, bh);
             return (
               <div
                 key={m.mission_id}
                 className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-1/2"
-                style={{ left: `${(x / SVG_W) * 100}%`, top: `${(y / SVG_H) * 100}%` }}
+                style={{ left: `${(x / bw) * 100}%`, top: `${(y / bh) * 100}%` }}
               >
                 <AmbulanceLayer mission={m} />
               </div>

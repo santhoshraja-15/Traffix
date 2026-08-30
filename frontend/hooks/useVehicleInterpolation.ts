@@ -94,8 +94,31 @@ export function useVehicleInterpolation(vehicles: StreamVehicle[]): Vehicle[] {
 
   // Continuous rAF loop — purely visual interpolation, never invents a
   // position beyond the current tween's real target.
+  //
+  // Bug fixed here: this used to call setRendered(next) unconditionally on
+  // EVERY frame (up to 60fps), even when there were zero vehicles to
+  // animate — `next` is a fresh array reference each tick, so React never
+  // bails out on equality, and every TrafficMap consumer (the whole SVG
+  // fallback tree, including all ~3187 road paths) re-rendered continuously
+  // as a result. Since mock mode (this project's mode the entire session —
+  // "MOCK SIMULATION MODE" — real per-vehicle data only exists once SUMO is
+  // connected) always reports zero vehicles, this ran at up to 60fps
+  // forever on every load. Now skipped whenever there's nothing to animate,
+  // with exactly one settle-to-empty commit on the real 0-vehicle
+  // transition so a departing fleet still visibly clears.
   useEffect(() => {
+    let wasEmpty = true; // `rendered` starts as []
     const tick = () => {
+      if (tweens.current.size === 0) {
+        if (!wasEmpty) {
+          setRendered([]);
+          wasEmpty = true;
+        }
+        rafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      wasEmpty = false;
+
       const now = performance.now();
       const next: Vehicle[] = [];
 
