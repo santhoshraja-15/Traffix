@@ -28,7 +28,7 @@
 import { useEffect, useRef } from "react";
 import { calculateRoutes } from "@/services/navigationApi";
 import { RouteOption, RouteSearchResult } from "@/types/route";
-import type { EdgeRiskMap } from "@/hooks/useWebSocket";
+import type { EdgeRiskMap, StreamAccident } from "@/hooks/useWebSocket";
 
 // Rate limits: never re-check more often than MIN_INTERVAL even if risk is
 // swinging wildly, but always re-check at least once every MAX_INTERVAL as
@@ -46,6 +46,25 @@ export interface RouteUpdateEvent {
   previous: RouteOption;
   result: RouteSearchResult;
   reason: string;
+  /** True when the trigger was the active route passing through a real,
+   * currently-active accident's edge — see FLOW.md's "ordinary-user
+   * rerouting around the emergency zone" flow (Phase 9). */
+  isEmergencyZone: boolean;
+}
+
+/**
+ * Fired when the active route just started passing through a real,
+ * currently-active accident's edge but the backend's freshly-recomputed
+ * route was NOT a genuinely faster alternative (isDifferentRoute or the
+ * improvement bar failed) — an accident only ever makes the affected area
+ * *worse*, so "beats what you were originally promised" often can't be
+ * cleared even though the hazard itself is real. Rather than silently
+ * saying nothing (the risk is real, the user should know) or fabricating a
+ * reroute that isn't actually better, this carries the honest, real
+ * accident record so the UI can warn without a false "we fixed it" claim.
+ */
+export interface EmergencyZoneWarningEvent {
+  accident: StreamAccident;
 }
 
 interface UseRouteReoptimizationArgs {
@@ -54,7 +73,14 @@ interface UseRouteReoptimizationArgs {
   destination: string;
   currentRoute: RouteOption | null;
   riskByEdge: EdgeRiskMap;
+  /** Real, currently-active accidents — used only to recognize when the
+   * active route itself passes through one, for the emergency-zone
+   * messaging/urgency below. Never invents an accident. */
+  accidents: StreamAccident[];
   onRouteUpdated: (event: RouteUpdateEvent) => void;
+  /** Optional: called instead of onRouteUpdated when the route enters an
+   * emergency zone but no genuinely faster alternative was found. */
+  onEmergencyZoneWarning?: (event: EmergencyZoneWarningEvent) => void;
 }
 
 export function useRouteReoptimization({
@@ -63,23 +89,44 @@ export function useRouteReoptimization({
   destination,
   currentRoute,
   riskByEdge,
+  accidents,
   onRouteUpdated,
+  onEmergencyZoneWarning,
 }: UseRouteReoptimizationArgs) {
   // Refs for values read inside the effect without needing to be in its
   // dependency array (avoids re-subscribing/stale-closure issues — same
   // pattern as hooks/useWebSocket.ts).
-  const stateRef = useRef({ active, origin, destination, currentRoute, onRouteUpdated });
-  stateRef.current = { active, origin, destination, currentRoute, onRouteUpdated };
+  const stateRef = useRef({
+    active,
+    origin,
+    destination,
+    currentRoute,
+    accidents,
+    onRouteUpdated,
+    onEmergencyZoneWarning,
+  });
+  stateRef.current = {
+    active,
+    origin,
+    destination,
+    currentRoute,
+    accidents,
+    onRouteUpdated,
+    onEmergencyZoneWarning,
+  };
 
   const lastCheckRisk = useRef<number | null>(null);
   const lastCheckAt = useRef<number>(0);
+  const wasInEmergencyZone = useRef(false);
   const checking = useRef(false);
 
   useEffect(() => {
-    const { active, origin, destination, currentRoute, onRouteUpdated } = stateRef.current;
+    const { active, origin, destination, currentRoute, accidents, onRouteUpdated, onEmergencyZoneWarning } =
+      stateRef.current;
 
     if (!active || !currentRoute || currentRoute.roadIds.length === 0) {
       lastCheckRisk.current = null;
+      wasInEmergencyZone.current = false;
       return;
     }
 
@@ -89,12 +136,23 @@ export function useRouteReoptimization({
     if (risks.length === 0) return; // no live risk data for this route yet
     const avgRisk = risks.reduce((a, b) => a + b, 0) / risks.length;
 
+    // The active route now runs through a real, currently-active accident's
+    // edge — check immediately rather than waiting for the risk delta or
+    // the periodic safety net, matching FLOW.md's "IF emergency zone
+    // congests → backend reroutes affected ordinary users" urgency.
+    const accidentByEdgeId = new Map(accidents.map((a) => [a.edge_id, a] as const));
+    const routeAccident = currentRoute.roadIds.map((id) => accidentByEdgeId.get(id)).find((a) => a !== undefined);
+    const routeInEmergencyZone = routeAccident !== undefined;
+    const justEnteredEmergencyZone = routeInEmergencyZone && !wasInEmergencyZone.current;
+    wasInEmergencyZone.current = routeInEmergencyZone;
+
     if (lastCheckRisk.current === null) {
       // First observation for this active route — establish the baseline,
-      // don't check yet (nothing to compare against).
+      // don't check yet (nothing to compare against), unless it's already
+      // in an emergency zone the moment it's picked up.
       lastCheckRisk.current = avgRisk;
       lastCheckAt.current = Date.now();
-      return;
+      if (!justEnteredEmergencyZone) return;
     }
 
     const elapsed = Date.now() - lastCheckAt.current;
@@ -102,7 +160,7 @@ export function useRouteReoptimization({
     const dueToMeaningfulChange = elapsed > MIN_INTERVAL_MS && riskDelta > RISK_DELTA_THRESHOLD;
     const dueToSafetyNet = elapsed > MAX_INTERVAL_MS;
 
-    if (checking.current || (!dueToMeaningfulChange && !dueToSafetyNet)) return;
+    if (checking.current || (!dueToMeaningfulChange && !dueToSafetyNet && !justEnteredEmergencyZone)) return;
 
     checking.current = true;
     const previousAvgRisk = lastCheckRisk.current;
@@ -120,14 +178,22 @@ export function useRouteReoptimization({
         );
 
         if (isDifferentRoute && improvement > requiredImprovement) {
-          const riskDirection =
-            avgRisk > previousAvgRisk
-              ? `risk along your route rose from ${Math.round(previousAvgRisk * 100)}% to ${Math.round(avgRisk * 100)}%`
-              : `traffic conditions changed`;
-          const reason = `Live re-evaluation: ${riskDirection} — the backend found a route ${Math.round(
-            improvement
-          )} min faster.`;
-          onRouteUpdated({ previous: currentRoute, result, reason });
+          const reason = routeInEmergencyZone
+            ? "EMERGENCY ZONE AHEAD — rerouting to a lower-congestion road."
+            : `Live re-evaluation: ${
+                avgRisk > previousAvgRisk
+                  ? `risk along your route rose from ${Math.round(previousAvgRisk * 100)}% to ${Math.round(avgRisk * 100)}%`
+                  : "traffic conditions changed"
+              } — the backend found a route ${Math.round(improvement)} min faster.`;
+          onRouteUpdated({ previous: currentRoute, result, reason, isEmergencyZone: routeInEmergencyZone });
+        } else if (routeInEmergencyZone && routeAccident) {
+          // The route genuinely enters a real accident's edge, but nothing
+          // the backend found actually beats the ETA the user was already
+          // promised — an accident only ever makes the area worse, so that
+          // bar frequently can't be cleared even though the hazard is real.
+          // Warn honestly with the real accident record instead of either
+          // staying silent or fabricating a "we rerouted you" claim.
+          onEmergencyZoneWarning?.({ accident: routeAccident });
         }
       })
       .catch(() => {
@@ -137,5 +203,5 @@ export function useRouteReoptimization({
       .finally(() => {
         checking.current = false;
       });
-  }, [riskByEdge]);
+  }, [riskByEdge, accidents]);
 }

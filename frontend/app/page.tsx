@@ -26,7 +26,11 @@ import { calculateRoutes } from "@/services/navigationApi";
 import { simulateAccident, resolveAccident } from "@/services/accidentApi";
 import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
 import { useTraffixContext } from "@/context/TraffixContext";
-import { useRouteReoptimization, RouteUpdateEvent } from "@/hooks/useRouteReoptimization";
+import {
+  useRouteReoptimization,
+  RouteUpdateEvent,
+  EmergencyZoneWarningEvent,
+} from "@/hooks/useRouteReoptimization";
 import { API_ORIGIN } from "@/lib/constants";
 import { CheckCircle2, ShieldAlert, RefreshCw } from "lucide-react";
 
@@ -43,7 +47,14 @@ export default function HomePage() {
     previousEtaMinutes: number;
     nextEtaMinutes: number;
     reason: string;
+    isEmergencyZone: boolean;
   } | null>(null);
+  // A real, currently-active accident sits on the user's active route, but
+  // the backend genuinely found nothing faster than the ETA already
+  // promised (an accident only ever makes the area worse) — honest warning,
+  // never a fabricated "we rerouted you" claim. See useRouteReoptimization's
+  // EmergencyZoneWarningEvent doc comment.
+  const [zoneWarning, setZoneWarning] = useState<{ severity: string; roadName: string } | null>(null);
   const [showComparison, setShowComparison] = useState(false);
 
   const [mapReady, setMapReady] = useState(false);
@@ -131,20 +142,34 @@ export default function HomePage() {
   // ── Continuous rerouting: while a route is active, real live risk along
   // its own edges is watched and the backend is asked to re-evaluate only
   // when that signal has moved meaningfully — see hooks/useRouteReoptimization.ts.
-  const handleRouteUpdated = ({ previous, result, reason }: RouteUpdateEvent) => {
+  const handleRouteUpdated = ({ previous, result, reason, isEmergencyZone }: RouteUpdateEvent) => {
     setRoutes(result.optimalRoutes);
     setSelectedRoute(result.recommendedRoute);
     setRouteUpdateNotice({
       previousEtaMinutes: previous.etaMinutes,
       nextEtaMinutes: result.recommendedRoute.etaMinutes,
       reason,
+      isEmergencyZone,
     });
     pushMessage({
       id: `msg-${Date.now()}-reroute`,
       timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: "routing",
-      text: "ROUTE UPDATED",
+      type: isEmergencyZone ? "accident" : "routing",
+      text: isEmergencyZone ? "⚠ EMERGENCY ZONE AHEAD" : "ROUTE UPDATED",
       details: reason,
+      urgent: isEmergencyZone,
+    });
+  };
+
+  const handleEmergencyZoneWarning = ({ accident }: EmergencyZoneWarningEvent) => {
+    setZoneWarning({ severity: accident.severity, roadName: accident.road_name });
+    pushMessage({
+      id: `msg-${Date.now()}-zone-warning`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "accident",
+      text: "⚠ ACTIVE ACCIDENT ON YOUR ROUTE",
+      details: `${accident.road_name} — ${accident.severity.toUpperCase()} severity. No faster alternative was found; continue with caution.`,
+      urgent: true,
     });
   };
 
@@ -154,7 +179,9 @@ export default function HomePage() {
     destination: activeSearch?.destination ?? "",
     currentRoute: selectedRoute,
     riskByEdge,
+    accidents: liveAccidents,
     onRouteUpdated: handleRouteUpdated,
+    onEmergencyZoneWarning: handleEmergencyZoneWarning,
   });
 
   // Auto-dismiss the ROUTE UPDATED toast after a few seconds, per
@@ -164,6 +191,12 @@ export default function HomePage() {
     const t = setTimeout(() => setRouteUpdateNotice(null), 8000);
     return () => clearTimeout(t);
   }, [routeUpdateNotice]);
+
+  useEffect(() => {
+    if (!zoneWarning) return;
+    const t = setTimeout(() => setZoneWarning(null), 8000);
+    return () => clearTimeout(t);
+  }, [zoneWarning]);
 
   // ── Accident detection — reports a real accident to the backend, which
   // applies a genuine capacity reduction to the affected edge. The resulting
@@ -276,15 +309,46 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* ROUTE UPDATED — only ever fires from a real backend re-evaluation
-            (hooks/useRouteReoptimization.ts), never speculatively */}
+        {/* ROUTE UPDATED / EMERGENCY ZONE AHEAD — only ever fires from a real
+            backend re-evaluation (hooks/useRouteReoptimization.ts), never
+            speculatively. One coherent banner per ANIMATED_EFFECTS.md §8,
+            styled distinctly (emergency palette) when the trigger was a
+            real accident on the active route. */}
         {routeUpdateNotice && (
-          <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs font-semibold text-emerald-900 flex items-center justify-between shadow-xs animate-pulse">
+          <div
+            className={`rounded-xl p-3 text-xs font-semibold flex items-center justify-between shadow-xs animate-pulse ${
+              routeUpdateNotice.isEmergencyZone
+                ? "bg-red-50 border border-red-300 text-red-900"
+                : "bg-emerald-50 border border-emerald-200 text-emerald-900"
+            }`}
+          >
             <div className="flex items-center gap-2">
-              <RefreshCw className="w-4 h-4 text-emerald-600 shrink-0" />
+              {routeUpdateNotice.isEmergencyZone ? (
+                <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+              ) : (
+                <RefreshCw className="w-4 h-4 text-emerald-600 shrink-0" />
+              )}
               <span>
-                <strong>ROUTE UPDATED</strong> — {Math.round(routeUpdateNotice.previousEtaMinutes)} min →{" "}
+                <strong>{routeUpdateNotice.isEmergencyZone ? "EMERGENCY ZONE AHEAD" : "ROUTE UPDATED"}</strong> —{" "}
+                {Math.round(routeUpdateNotice.previousEtaMinutes)} min →{" "}
                 {Math.round(routeUpdateNotice.nextEtaMinutes)} min. {routeUpdateNotice.reason}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ACTIVE ACCIDENT ON YOUR ROUTE — a real accident sits on the active
+            route but the backend found nothing genuinely faster than the ETA
+            already promised (an accident only ever makes the area worse, so
+            that bar often can't be cleared). Honest hazard warning, never a
+            fabricated "rerouted" claim — see EmergencyZoneWarningEvent. */}
+        {zoneWarning && (
+          <div className="rounded-xl p-3 text-xs font-semibold flex items-center justify-between shadow-xs animate-pulse bg-red-50 border border-red-300 text-red-900">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+              <span>
+                <strong>ACTIVE ACCIDENT ON YOUR ROUTE</strong> — {zoneWarning.roadName} (
+                {zoneWarning.severity.toUpperCase()}). No faster alternative was found; continue with caution.
               </span>
             </div>
           </div>
