@@ -35,6 +35,18 @@ export interface StreamEdge {
   source?: string;
 }
 
+/** One live vehicle position, as broadcast by SimulationManager (real TraCI
+ * data only — this array is empty whenever `source !== "sumo"`, since the
+ * mock sensor path has no individual vehicles to report). */
+export interface StreamVehicle {
+  id: string;
+  lat: number;
+  lng: number;
+  heading: number; // compass bearing, 0 = north, clockwise
+  speed_kmh: number;
+  edge_id: string;
+}
+
 export interface SimulationStreamPayload {
   type: string;
   simulation_id: string;
@@ -44,6 +56,7 @@ export interface SimulationStreamPayload {
   model?: string;
   source?: string;
   traffic: StreamEdge[];
+  vehicles: StreamVehicle[];
   timestamp: string;
 }
 
@@ -60,6 +73,7 @@ const RECONNECT_MAX_MS   = 30_000;
 export interface UseTrafficSocketReturn {
   connected: boolean;
   riskByEdge: EdgeRiskMap;
+  vehicles: StreamVehicle[];
   tick: number | undefined;
 }
 
@@ -72,6 +86,7 @@ export interface UseTrafficSocketReturn {
 export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
   const [connected, setConnected] = useState(false);
   const [riskByEdge, setRiskByEdge] = useState<EdgeRiskMap>({});
+  const [vehicles, setVehicles] = useState<StreamVehicle[]>([]);
   const [tick, setTick] = useState<number | undefined>(undefined);
 
   // Refs — never trigger re-renders, safe to read inside closures.
@@ -100,6 +115,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
         next[edge.edge_id] = edge.risk_score;
       }
       setRiskByEdge(next);
+      setVehicles(payload.vehicles ?? []);
       setTick(payload.tick);
     };
 
@@ -195,5 +211,5 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
     };
   }, [simulationId]);
 
-  return { connected, riskByEdge, tick };
+  return { connected, riskByEdge, vehicles, tick };
 }

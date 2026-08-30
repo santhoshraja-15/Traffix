@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
+from app.integrations.sumo_network_loader import RealNetwork, get_real_network
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -29,6 +30,16 @@ class RoadNetworkGraph:
     def __init__(self) -> None:
         self.graph: nx.DiGraph = nx.DiGraph()
         self._initialized = False
+        # "sumo_network" (real Anna Nagar geometry) or "synthetic_fallback"
+        # (placeholder grid, used only if the real network fails to load) —
+        # exposed via to_geojson() metadata so the frontend can tell honestly
+        # apart "this is real" from "this is a degraded placeholder" instead
+        # of silently presenting a fake grid as if it were Anna Nagar.
+        self._source: str = "uninitialized"
+
+    @property
+    def source(self) -> str:
+        return self._source
 
     def initialize_graph(
         self,
@@ -38,13 +49,86 @@ class RoadNetworkGraph:
         edge_length_m: float = 250.0,
     ) -> None:
         """
+        Build the routing graph from the real Anna Nagar SUMO network when
+        available; fall back to a synthetic placeholder grid only if the
+        real network can't be loaded (see
+        app.integrations.sumo_network_loader.get_real_network for why that
+        might fail — missing dependency, missing file, bad projection).
+        """
+        real = get_real_network()
+        if real is not None:
+            self._initialize_from_real_network(real)
+            return
+
+        self._initialize_synthetic_grid(grid_rows, grid_cols, base_speed_kmh, edge_length_m)
+
+    def _initialize_from_real_network(self, real: RealNetwork) -> None:
+        """Build the graph from real SUMO node/edge geometry — one edge per SUMO edge."""
+        self.graph = nx.DiGraph()
+
+        for node in real.nodes:
+            self.graph.add_node(node.node_id, lat=node.lat, lng=node.lng)
+
+        # Per-lane capacity heuristic (vehicles the edge can hold at moderate
+        # density) — mirrors the mock grid's flat 120 for a single-lane
+        # 250 m edge, scaled by real lane count and length.
+        per_lane_capacity_per_km = 120.0 / 0.25
+
+        for edge in real.edges:
+            if not self.graph.has_node(edge.from_node) or not self.graph.has_node(edge.to_node):
+                continue  # defensive — shouldn't happen, every edge endpoint is a parsed node
+            speed_kmh = max(edge.speed_limit_kmh, 5.0)
+            base_travel_time = edge.length_m / (speed_kmh * 1000 / 3600)  # seconds
+            capacity = max(1.0, per_lane_capacity_per_km * (edge.length_m / 1000.0) * edge.lane_count)
+
+            self.graph.add_edge(
+                edge.from_node,
+                edge.to_node,
+                edge_id=edge.edge_id,
+                base_weight=base_travel_time,
+                weight=base_travel_time,
+                congestion=0.0,
+                length_m=edge.length_m,
+                capacity=capacity,
+                lane_count=edge.lane_count,
+                speed_limit_kmh=speed_kmh,
+                vehicle_count=0,
+                avg_speed=speed_kmh,
+                # [(lng, lat), ...] — full real geometry, used by to_geojson()
+                # instead of a straight line between the two endpoint nodes.
+                shape=edge.shape,
+            )
+
+        self._initialized = True
+        self._source = "sumo_network"
+        logger.info(
+            "Initialized routing graph from the real Anna Nagar SUMO network: "
+            "%d nodes, %d edges.",
+            self.graph.number_of_nodes(),
+            self.graph.number_of_edges(),
+        )
+
+    def _initialize_synthetic_grid(
+        self,
+        grid_rows: int,
+        grid_cols: int,
+        base_speed_kmh: float,
+        edge_length_m: float,
+    ) -> None:
+        """
         Build a mock rows x cols grid network. Node IDs are "n{row}_{col}";
         edges run bidirectionally between orthogonal neighbors. Each edge
         stores lat/lng (synthetic, small offsets around a fixed origin so the
-        frontend map has coordinates to render) plus routing attributes.
+        frontend map has *something* to render) plus routing attributes.
+
+        This is a degraded fallback only — see initialize_graph(). It does
+        not represent real Anna Nagar geometry and self._source reflects
+        that so callers/UI can be honest about it.
         """
         self.graph = nx.DiGraph()
-        # Anna Nagar, Chennai (Tower / 2nd Avenue grid)
+        # Anna Nagar, Chennai (Tower / 2nd Avenue grid) — same origin as the
+        # real network's approximate center, purely so the placeholder is at
+        # least in the right neighborhood if it's ever shown.
         origin_lat, origin_lng = 13.0850, 80.2101
         lat_step, lng_step = 0.0022, 0.0022
 
@@ -84,8 +168,11 @@ class RoadNetworkGraph:
                     add_bidirectional_edge(node_id, f"n{r + 1}_{c}")
 
         self._initialized = True
-        logger.info(
-            "Initialized mock grid graph: %d nodes, %d edges",
+        self._source = "synthetic_fallback"
+        logger.warning(
+            "Initialized SYNTHETIC PLACEHOLDER grid graph (%d nodes, %d edges) — "
+            "the real Anna Nagar network failed to load; see the preceding "
+            "error. This graph does NOT represent real geometry.",
             self.graph.number_of_nodes(),
             self.graph.number_of_edges(),
         )
@@ -220,15 +307,28 @@ class RoadNetworkGraph:
         }
 
     def to_geojson(self, name: str = "Anna Nagar Road Network") -> dict:
-        """Export the live graph as a GeoJSON FeatureCollection of LineStrings."""
+        """
+        Export the live graph as a GeoJSON FeatureCollection of LineStrings.
+
+        Uses each edge's real, full geometry ("shape") when the graph was
+        built from the real SUMO network — never a straight line between the
+        two endpoint junctions — falling back to a straight two-point line
+        only for the synthetic placeholder grid, which has no richer shape.
+        """
         features: List[dict] = []
         for u, v, data in self.graph.edges(data=True):
-            u_coord = self.get_node_coord(str(u))
-            v_coord = self.get_node_coord(str(v))
-            if u_coord is None or v_coord is None:
-                continue
-            u_lat, u_lng = u_coord
-            v_lat, v_lng = v_coord
+            shape = data.get("shape")
+            if shape:
+                coordinates = [[lng, lat] for lng, lat in shape]
+            else:
+                u_coord = self.get_node_coord(str(u))
+                v_coord = self.get_node_coord(str(v))
+                if u_coord is None or v_coord is None:
+                    continue
+                u_lat, u_lng = u_coord
+                v_lat, v_lng = v_coord
+                coordinates = [[u_lng, u_lat], [v_lng, v_lat]]
+
             features.append(
                 {
                     "type": "Feature",
@@ -244,7 +344,7 @@ class RoadNetworkGraph:
                     },
                     "geometry": {
                         "type": "LineString",
-                        "coordinates": [[u_lng, u_lat], [v_lng, v_lat]],
+                        "coordinates": coordinates,
                     },
                 }
             )
@@ -263,6 +363,10 @@ class RoadNetworkGraph:
                 "area": "Anna Nagar, Chennai",
                 "nodes": self.graph.number_of_nodes(),
                 "edges": self.graph.number_of_edges(),
+                # "sumo_network" = real geometry, "synthetic_fallback" = the
+                # placeholder grid (only used if the real network failed to
+                # load) — see RoadNetworkGraph.initialize_graph().
+                "source": self._source,
             },
             "features": features,
         }

@@ -288,16 +288,19 @@ class SimulationManager:
                 #
                 if sumo_active:
                     sumo_step_func = functools.partial(bridge.simulation_step_and_collect)
-                    raw_metrics: list[Dict[str, Any]] = await loop.run_in_executor(
+                    raw_metrics: list[Dict[str, Any]]
+                    raw_vehicles: list[Dict[str, Any]]
+                    raw_metrics, raw_vehicles = await loop.run_in_executor(
                         bridge.executor,   # ← dedicated 1-worker pool (max_workers=1)
                         sumo_step_func,    # ← sync: step + collect in one thread call
                     )
                     if raw_metrics:
                         # Verification plan stop condition — must appear per tick.
                         logger.info(
-                            "Simulation %s: SUMO tick OK — collected %d edges from TraCI",
+                            "Simulation %s: SUMO tick OK — collected %d edges, %d vehicles from TraCI",
                             simulation_id,
                             len(raw_metrics),
+                            len(raw_vehicles),
                         )
                     else:
                         # Bridge marked itself disconnected after an error.
@@ -311,6 +314,7 @@ class SimulationManager:
                         data_source = "mock"
                 else:
                     raw_metrics = []
+                    raw_vehicles = []
 
                 # ── Step 2: Push data into the routing graph ─────────────────
                 if sumo_active and raw_metrics:
@@ -389,6 +393,12 @@ class SimulationManager:
                         }
                     )
 
+                # Individual vehicle markers — only meaningful when SUMO is
+                # actually connected; the mock sensor path has no per-vehicle
+                # data to report, so this is an honest empty list rather than
+                # a fabricated one (never invent vehicles that don't exist).
+                vehicle_events: list[Dict[str, Any]] = raw_vehicles if sumo_active else []
+
                 payload: Dict[str, Any] = {
                     "type": UpdateType.TRAFFIC.value,
                     "simulation_id": simulation_id,
@@ -398,6 +408,7 @@ class SimulationManager:
                     "model": "v15_xgboost" if sumo_active else "v16_xgboost",
                     "source": data_source,
                     "traffic": traffic_events,
+                    "vehicles": vehicle_events,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 

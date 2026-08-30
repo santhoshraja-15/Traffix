@@ -46,7 +46,7 @@ export default function HomePage() {
   const { kpi, setKpi } = useLiveKpi(5000, mapReady);
 
   // ── The one app-wide WebSocket connection, owned by TraffixProvider ──────
-  const { wsConnected, wsStep, riskByEdge } = useTraffixContext();
+  const { wsConnected, wsStep, riskByEdge, vehicles: liveVehicles } = useTraffixContext();
 
   // ── Live intelligence message feed ────────────────────────────────────────
   const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
@@ -253,6 +253,7 @@ export default function HomePage() {
                 ambulance={ambulance}
                 isNavigating={true}
                 riskByEdge={riskByEdge}
+                vehicles={liveVehicles}
                 onBaselineReady={() => setMapReady(true)}
               />
             </div>
