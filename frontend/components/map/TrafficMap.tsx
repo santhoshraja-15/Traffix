@@ -4,13 +4,13 @@ import { useEffect, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { DEFAULT_MAP_CENTER, DEFAULT_MAP_ZOOM, DEFAULT_MAP_PITCH, MAPBOX_TOKEN } from "@/lib/constants";
-import { RouteOption } from "@/types/route";
-import { Ambulance } from "@/types/ambulance";
+import { RouteOption, LocationSuggestion } from "@/types/route";
 import { TrafficStateSnapshot } from "@/types/traffic";
 import type { FeatureCollection } from "geojson";
 import { boundsFromTopology, NetworkTopology, projectToViewBox, riskToColor } from "@/lib/map";
 import { fetchNetworkTopology } from "@/services/networkApi";
-import { EdgeRiskMap, StreamAccident, StreamVehicle } from "@/hooks/useSimulationStream";
+import { fetchRealHospitals } from "@/services/ambulanceApi";
+import { EdgeRiskMap, StreamAccident, StreamMission, StreamVehicle } from "@/hooks/useSimulationStream";
 import { useVehicleInterpolation } from "@/hooks/useVehicleInterpolation";
 
 import HUDOverlay, { LayerVisibilityState } from "./HUDOverlay";
@@ -37,13 +37,25 @@ const ROUTE_LAYER = "active-route-line";
 const ROUTE_COLOR = "#0ea5e9";
 const ACCIDENTS_SOURCE = "active-accidents";
 const ACCIDENTS_LAYER = "active-accidents-dots";
+const CORRIDOR_SOURCE = "green-corridor";
+const CORRIDOR_LAYER = "green-corridor-line";
+// Distinct both from the risk-severity green (thin, low opacity, used for
+// LOW-risk roads) and from the user route's blue — a clearly separate,
+// bold emergency accent per DESIGN_SYSTEM.md §3/§7.
+const CORRIDOR_COLOR = "#16a34a";
+const AMBULANCE_SOURCE = "active-ambulances";
+const AMBULANCE_LAYER = "active-ambulances-dots";
+const HOSPITALS_SOURCE = "real-hospitals";
+const HOSPITALS_LAYER = "real-hospitals-dots";
 
 interface TrafficMapProps {
   activeRoute?: RouteOption;
   /** Real, currently-active accidents from the WebSocket stream — see
    * app/services/accident_service.py. Empty array, never fabricated. */
   accidents?: StreamAccident[];
-  ambulance?: Ambulance | null;
+  /** Real, currently-active emergency missions — see
+   * app/emergency/mission_manager.py. Empty array, never fabricated. */
+  missions?: StreamMission[];
   isNavigating?: boolean;
   trafficSnapshot?: TrafficStateSnapshot;
   riskByEdge?: EdgeRiskMap;
@@ -64,6 +76,55 @@ function accidentsToGeoJSON(accidents: StreamAccident[]): FeatureCollection {
         properties: { id: a.accident_id, severity: a.severity, roadName: a.road_name },
         geometry: { type: "Point", coordinates: [a.lng as number, a.lat as number] },
       })),
+  };
+}
+
+// The real emergency route(s) each mission is currently on — outbound while
+// heading to the accident, the real (possibly different) return route once
+// heading back. Never a straight line: both come straight from the real
+// routing engine (see app/emergency/mission_manager.py).
+function missionsToCorridorGeoJSON(missions: StreamMission[]): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: missions
+      .filter((m) => m.state !== "emergency_completed")
+      .map((m) => {
+        const coords =
+          m.state === "returning_to_hospital" && m.return_coords ? m.return_coords : m.outbound_coords;
+        return {
+          type: "Feature" as const,
+          properties: { id: m.mission_id },
+          geometry: {
+            type: "LineString" as const,
+            coordinates: coords.map((c) => [c.lng, c.lat]),
+          },
+        };
+      })
+      .filter((f) => f.geometry.coordinates.length >= 2),
+  };
+}
+
+function missionsToAmbulanceGeoJSON(missions: StreamMission[]): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: missions
+      .filter((m) => m.state !== "emergency_completed")
+      .map((m) => ({
+        type: "Feature",
+        properties: { id: m.mission_id, state: m.state, unit: m.unit_number },
+        geometry: { type: "Point", coordinates: [m.lng, m.lat] },
+      })),
+  };
+}
+
+function hospitalsToGeoJSON(hospitals: LocationSuggestion[]): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: hospitals.map((h) => ({
+      type: "Feature",
+      properties: { name: h.name },
+      geometry: { type: "Point", coordinates: [h.lng, h.lat] },
+    })),
   };
 }
 
@@ -100,7 +161,7 @@ function vehiclesToGeoJSON(vehicles: ReturnType<typeof useVehicleInterpolation>)
 export default function TrafficMap({
   activeRoute,
   accidents = [],
-  ambulance,
+  missions = [],
   isNavigating = false,
   trafficSnapshot = MOCK_TRAFFIC_SNAPSHOT,
   riskByEdge = {},
@@ -115,9 +176,15 @@ export default function TrafficMap({
   const [topologyError, setTopologyError] = useState<string | null>(null);
   const topologyRef = useRef<NetworkTopology | null>(null);
   topologyRef.current = topology;
+  const [hospitals, setHospitals] = useState<LocationSuggestion[]>([]);
 
   // Real, continuously-interpolated vehicle positions (ANIMATED_EFFECTS.md §2).
   const interpolatedVehicles = useVehicleInterpolation(vehicles);
+
+  // Real hospitals — fetched once (they don't change during a session).
+  useEffect(() => {
+    fetchRealHospitals().then(setHospitals).catch(() => setHospitals([]));
+  }, []);
 
   const [layers, setLayers] = useState<LayerVisibilityState>({
     buildings: true,
@@ -307,6 +374,56 @@ export default function TrafficMap({
               },
             });
           }
+
+          if (!map.current.getSource(CORRIDOR_SOURCE)) {
+            map.current.addSource(CORRIDOR_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: CORRIDOR_LAYER,
+              type: "line",
+              source: CORRIDOR_SOURCE,
+              layout: { "line-cap": "round", "line-join": "round" },
+              paint: { "line-width": 6, "line-color": CORRIDOR_COLOR, "line-opacity": 0.85 },
+            });
+          }
+
+          if (!map.current.getSource(AMBULANCE_SOURCE)) {
+            map.current.addSource(AMBULANCE_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: AMBULANCE_LAYER,
+              type: "circle",
+              source: AMBULANCE_SOURCE,
+              paint: {
+                "circle-radius": 7,
+                "circle-color": "#0ea5e9",
+                "circle-stroke-width": 2,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+          }
+
+          if (!map.current.getSource(HOSPITALS_SOURCE)) {
+            map.current.addSource(HOSPITALS_SOURCE, {
+              type: "geojson",
+              data: { type: "FeatureCollection", features: [] },
+            });
+            map.current.addLayer({
+              id: HOSPITALS_LAYER,
+              type: "circle",
+              source: HOSPITALS_SOURCE,
+              paint: {
+                "circle-radius": 4,
+                "circle-color": "#f43f5e",
+                "circle-stroke-width": 1,
+                "circle-stroke-color": "#ffffff",
+              },
+            });
+          }
         });
       }
     }
@@ -386,6 +503,22 @@ export default function TrafficMap({
     source.setData(accidentsToGeoJSON(accidents));
   }, [accidents]);
 
+  // Real emergency missions — green corridor route + ambulance position,
+  // both real (see app/emergency/mission_manager.py), updated every tick.
+  useEffect(() => {
+    const corridorSource = map.current?.getSource(CORRIDOR_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    const ambulanceSource = map.current?.getSource(AMBULANCE_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    if (corridorSource) corridorSource.setData(missionsToCorridorGeoJSON(missions));
+    if (ambulanceSource) ambulanceSource.setData(missionsToAmbulanceGeoJSON(missions));
+  }, [missions]);
+
+  // Real hospitals — static for the session.
+  useEffect(() => {
+    const source = map.current?.getSource(HOSPITALS_SOURCE) as mapboxgl.GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData(hospitalsToGeoJSON(hospitals));
+  }, [hospitals]);
+
   const bounds = topology ? boundsFromTopology(topology) : null;
   const live = Object.keys(riskByEdge).length > 0;
 
@@ -453,11 +586,57 @@ export default function TrafficMap({
               opacity={0.95}
             />
           )}
+          {/* Real emergency green corridor(s) — the actual route each active
+              mission is on (outbound or return), never a straight line. */}
+          {layers.emergency &&
+            bounds &&
+            missions
+              .filter((m) => m.state !== "emergency_completed")
+              .map((m) => {
+                const coords =
+                  m.state === "returning_to_hospital" && m.return_coords ? m.return_coords : m.outbound_coords;
+                if (coords.length < 2) return null;
+                const d = coords
+                  .map((c, i) => {
+                    const { x, y } = projectToViewBox(c.lng, c.lat, bounds, SVG_W, SVG_H);
+                    return `${i === 0 ? "M" : "L"} ${x.toFixed(1)} ${y.toFixed(1)}`;
+                  })
+                  .join(" ");
+                return (
+                  <path
+                    key={m.mission_id}
+                    d={d}
+                    fill="none"
+                    stroke={CORRIDOR_COLOR}
+                    strokeWidth={5}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    opacity={0.85}
+                  />
+                );
+              })}
           {layers.vehicles && bounds && (
             <VehicleLayer vehicles={interpolatedVehicles} bounds={bounds} width={SVG_W} height={SVG_H} />
           )}
         </svg>
       )}
+
+      {/* Real hospitals — SVG-fallback mode only, same reasoning as the
+          accident/ambulance markers above. */}
+      {!hasToken &&
+        bounds &&
+        hospitals.map((h) => {
+          const { x, y } = projectToViewBox(h.lng, h.lat, bounds, SVG_W, SVG_H);
+          return (
+            <div
+              key={h.name}
+              className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-1/2"
+              style={{ left: `${(x / SVG_W) * 100}%`, top: `${(y / SVG_H) * 100}%` }}
+            >
+              <HospitalLayer name={h.name} />
+            </div>
+          );
+        })}
 
       {/* Real accident markers — SVG-fallback mode only (positioned from each
           accident's own real lat/lng, never a shared hardcoded offset).
@@ -481,6 +660,26 @@ export default function TrafficMap({
               >
                 <RippleEffect />
                 <AccidentZone accident={a} />
+              </div>
+            );
+          })}
+
+      {/* Real ambulance markers — SVG-fallback mode only, same reasoning as
+          the accident markers above (native AMBULANCE_LAYER handles Mapbox). */}
+      {!hasToken &&
+        layers.emergency &&
+        bounds &&
+        missions
+          .filter((m) => m.state !== "emergency_completed")
+          .map((m) => {
+            const { x, y } = projectToViewBox(m.lng, m.lat, bounds, SVG_W, SVG_H);
+            return (
+              <div
+                key={m.mission_id}
+                className="absolute z-20 pointer-events-none -translate-x-1/2 -translate-y-1/2"
+                style={{ left: `${(x / SVG_W) * 100}%`, top: `${(y / SVG_H) * 100}%` }}
+              >
+                <AmbulanceLayer mission={m} />
               </div>
             );
           })}
@@ -514,20 +713,10 @@ export default function TrafficMap({
         )}
       </div>
 
-      {!hasToken && (
+      {!hasToken && layers.signals && (
         <div className="absolute inset-0 pointer-events-none z-10">
-          {layers.signals && (
-            <div className="absolute left-[280px] top-[180px]">
-              <TrafficSignals signals={trafficSnapshot.signals} />
-            </div>
-          )}
-          {layers.emergency && ambulance && ambulance.status !== "idle" && (
-            <div className="absolute left-[340px] top-[180px] -translate-x-1/2 -translate-y-1/2">
-              <AmbulanceLayer ambulance={ambulance} />
-            </div>
-          )}
-          <div className="absolute left-[650px] top-[220px]">
-            <HospitalLayer />
+          <div className="absolute left-[280px] top-[180px]">
+            <TrafficSignals signals={trafficSnapshot.signals} />
           </div>
         </div>
       )}

@@ -5,7 +5,6 @@ import Header from "@/components/common/Header";
 import { ApplicationMode } from "@/types/common";
 import { ShieldAlert, Ambulance as AmbulanceIcon, Route, Play, CheckCircle2 } from "lucide-react";
 import { simulateAccident } from "@/services/accidentApi";
-import { dispatchAmbulance } from "@/services/ambulanceApi";
 import SignalManagementPanel from "@/components/traffic/SignalManagementPanel";
 import IotMonitoringPanel from "@/components/traffic/IotMonitoringPanel";
 
@@ -22,10 +21,17 @@ export default function FeaturesPage() {
     await simulateAccident(selectedRoad, "high");
   };
 
-  const handleDispatchAmbulance = async () => {
+  const handleDispatchAmbulance = () => {
+    // This standalone demo page pre-dates the real, backend-driven emergency
+    // workflow (accident → automatic nearest-hospital dispatch → real
+    // 8-state mission — see the main page and app/emergency/mission_manager.py).
+    // Manually "dispatching" a fake unit here from a hardcoded fake hospital
+    // would duplicate that with fabricated data, so this button is left
+    // inert with an honest message rather than calling a fake endpoint —
+    // flagged for the Phase 11 control audit (this whole page duplicates
+    // functionality the main page now does for real).
     setAmbulanceDispatched(true);
-    setStatusMessage("🚑 Ambulance A-07 dispatched. Emergency green corridor activated on SUMO network.");
-    await dispatchAmbulance("acc-101");
+    setStatusMessage("This demo control has been superseded by the real emergency workflow on the main page.");
   };
 
   return (

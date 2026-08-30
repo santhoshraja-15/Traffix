@@ -38,6 +38,7 @@ async def report_accident(request: AccidentCreateRequest) -> AccidentResponse:
         lanes_blocked=request.lanes_blocked,
         road_name=result["road_name"],
         status=result["status"],
+        mission_dispatched=result["mission_dispatched"],
     )
     return AccidentResponse(accident=accident)
 

@@ -61,6 +61,37 @@ export interface StreamAccident {
   reported_at: string;
 }
 
+/** A real, currently-active emergency mission — see
+ * app/emergency/mission_manager.py. Position and route geometry are both
+ * real (interpolated along the real backend-computed route by real
+ * elapsed simulation ticks), never invented on the frontend. */
+export type MissionState =
+  | "ambulance_dispatched"
+  | "green_corridor_active"
+  | "en_route_to_accident"
+  | "ambulance_arrived"
+  | "on_site_response"
+  | "returning_to_hospital"
+  | "emergency_completed";
+
+export interface StreamMission {
+  mission_id: string;
+  accident_id: string;
+  edge_id: string;
+  hospital_name: string;
+  ambulance_id: string;
+  unit_number: string;
+  state: MissionState;
+  lat: number;
+  lng: number;
+  outbound_coords: { lat: number; lng: number }[];
+  return_coords: { lat: number; lng: number }[] | null;
+  signal_priority_available: boolean;
+  // Ticks remaining in the on-site hold, driven by the backend's own
+  // simulation tick counter — never a frontend setTimeout/wall clock.
+  on_site_seconds_remaining: number | null;
+}
+
 export interface SimulationStreamPayload {
   type: string;
   simulation_id: string;
@@ -72,6 +103,7 @@ export interface SimulationStreamPayload {
   traffic: StreamEdge[];
   vehicles: StreamVehicle[];
   accidents: StreamAccident[];
+  emergency_missions: StreamMission[];
   timestamp: string;
 }
 
@@ -95,6 +127,7 @@ export interface UseTrafficSocketReturn {
   edges: StreamEdge[];
   vehicles: StreamVehicle[];
   accidents: StreamAccident[];
+  missions: StreamMission[];
   tick: number | undefined;
 }
 
@@ -110,6 +143,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
   const [edges, setEdges] = useState<StreamEdge[]>([]);
   const [vehicles, setVehicles] = useState<StreamVehicle[]>([]);
   const [accidents, setAccidents] = useState<StreamAccident[]>([]);
+  const [missions, setMissions] = useState<StreamMission[]>([]);
   const [tick, setTick] = useState<number | undefined>(undefined);
 
   // Refs — never trigger re-renders, safe to read inside closures.
@@ -141,6 +175,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
       setEdges(payload.traffic);
       setVehicles(payload.vehicles ?? []);
       setAccidents(payload.accidents ?? []);
+      setMissions(payload.emergency_missions ?? []);
       setTick(payload.tick);
     };
 
@@ -236,5 +271,5 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
     };
   }, [simulationId]);
 
-  return { connected, riskByEdge, edges, vehicles, accidents, tick };
+  return { connected, riskByEdge, edges, vehicles, accidents, missions, tick };
 }

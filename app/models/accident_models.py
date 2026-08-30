@@ -30,6 +30,10 @@ class AccidentReport(BaseModel):
     # real OSM name (see sumo_network_loader.py's ~44%-of-edges coverage).
     road_name: str = ""
     status: str = "active"  # "active" | "resolved"
+    # False when no real hospital/ambulance/route was available to respond —
+    # see app/emergency/mission_manager.py. The accident itself is still
+    # real either way; this just reports whether dispatch actually happened.
+    mission_dispatched: bool = False
 
 
 class AccidentResponse(BaseModel):

@@ -4,16 +4,15 @@ Accident service.
 Bridges the API layer with AccidentManager and the routing graph, so
 accident endpoints never import emergency/routing internals directly.
 
-Note: this deliberately does NOT go through
-app.emergency.emergency_routing.handle_accident() — that function also
-attempts ambulance dispatch, which (as of this phase) still assumes the
-old synthetic mock-grid's node IDs ("n0_0" etc.) that no longer exist on
-the real network graph (see app/emergency/ambulance_manager.py's seeded
-fleet and app/emergency/emergency_routing.py's edge_id.split("->")[0]
-node-resolution, both mock-grid-era). Wiring that up for real is Phase 8's
-job (ambulance dispatch, green corridor). This service focuses on what
-Phase 7 actually needs: real accident detection/recording and a real,
-measurable network impact.
+report_accident() also automatically starts a real emergency mission
+(app.emergency.mission_manager) — nearest real hospital, real ambulance,
+real route — matching MASTER_PROMPT.md's "whenever an active accident is
+detected, automatically run a full simulated emergency response." This
+deliberately does NOT go through the older
+app.emergency.emergency_routing.handle_accident() (which still assumes
+the old synthetic mock-grid's node IDs and has no state-machine/tick-
+driven timing at all) — mission_manager.py is the real, tick-driven
+replacement for that path.
 """
 from __future__ import annotations
 
@@ -82,6 +81,18 @@ class AccidentService:
                 edge_id, record.accident_id,
             )
 
+        # Automatically dispatch a real emergency mission — nearest real
+        # hospital + ambulance + real route. Declines honestly (logs why,
+        # doesn't fabricate) if no hospital/ambulance/route is available;
+        # the accident itself is still recorded and has its real impact
+        # either way.
+        from app.emergency.mission_manager import mission_manager  # noqa: PLC0415
+        from app.core.simulation_manager import simulation_manager  # noqa: PLC0415
+
+        ids = simulation_manager.active_simulations
+        current_tick = simulation_manager.tick_count(ids[0]) if ids else 0
+        mission = mission_manager.start_mission(record.accident_id, edge_id, current_tick)
+
         location = graph.get_edge_midpoint(edge_id)
         return {
             "accident_id": record.accident_id,
@@ -91,6 +102,7 @@ class AccidentService:
             "location": {"lat": location[0], "lng": location[1]} if location else None,
             "road_name": graph.get_edge_name(edge_id),
             "status": "active",
+            "mission_dispatched": mission is not None,
         }
 
     def resolve_accident(self, accident_id: str) -> bool:

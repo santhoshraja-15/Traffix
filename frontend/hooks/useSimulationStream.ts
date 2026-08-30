@@ -17,6 +17,8 @@ export type {
   StreamEdge,
   StreamVehicle,
   StreamAccident,
+  StreamMission,
+  MissionState,
   SimulationStreamPayload,
   EdgeRiskMap,
 } from "./useWebSocket";

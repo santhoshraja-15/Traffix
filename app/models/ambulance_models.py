@@ -1,33 +1,60 @@
-"""Ambulance/hospital schemas.
+"""Ambulance/hospital/emergency-mission schemas.
 
-Shapes are derived directly from how ``app/api/ambulance.py`` already
-constructs and consumes these objects. See ``FRONTEND_AUDIT.md`` §1.4 —
-this endpoint is a stub that doesn't yet call the real ``AmbulanceService``/
-``app/emergency`` pipeline; that rewiring is separate, later work. This file
-only supplies the missing request/response schemas so the module imports.
+Shapes are derived directly from app/emergency/ambulance_manager.py and
+app/emergency/mission_manager.py — the real fleet and mission state
+machine, not invented independently.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel
 
 from app.models.route_models import Coordinate
 
 
-class AmbulanceDispatchRequest(BaseModel):
-    origin: Coordinate
-    destination: Coordinate
+class HospitalInfo(BaseModel):
+    """A real hospital from app.integrations.osm_poi_loader — not invented."""
+
+    id: str
+    name: str
+    location: Coordinate
 
 
-class AmbulanceStatus(BaseModel):
+class AmbulanceUnit(BaseModel):
     ambulance_id: str
+    unit_number: str
+    hospital_name: str
+    status: str  # "available" | "dispatched" | "at_scene" | "returning"
+
+
+class RoutePlanInfo(BaseModel):
+    edges: List[str]
+    coords: List[Coordinate]
+    travel_time_s: float
+
+
+class EmergencyMissionInfo(BaseModel):
+    mission_id: str
+    accident_id: str
+    edge_id: str
+    hospital_name: str
+    ambulance_id: str
+    unit_number: str
+    state: str
     current_location: Coordinate
-    destination: Coordinate
-    route_edges: List[str]
-    green_corridor_active: bool = False
-    eta_seconds: int = 0
+    outbound_route: RoutePlanInfo
+    signal_priority_available: bool
+    on_site_seconds_remaining: Optional[float] = None
 
 
-class AmbulanceDispatchResponse(BaseModel):
-    ambulance: AmbulanceStatus
+class HospitalListResponse(BaseModel):
+    hospitals: List[HospitalInfo]
+
+
+class AmbulanceListResponse(BaseModel):
+    units: List[AmbulanceUnit]
+
+
+class MissionListResponse(BaseModel):
+    missions: List[EmergencyMissionInfo]

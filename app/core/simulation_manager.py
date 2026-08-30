@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional
 
 from app.core.websocket_manager import websocket_manager
 from app.emergency.accident_manager import accident_manager
+from app.emergency.mission_manager import mission_manager
 from app.integrations.existing_ml_adapter import TrafficModelAdapter, get_model_adapter
 from app.integrations.sumo_bridge import SUMO_AVAILABLE, SumoBridge
 from app.ml.model_registry import model_registry
@@ -434,6 +435,41 @@ class SimulationManager:
                         }
                     )
 
+                # Advance every active emergency mission by one real tick,
+                # then build the broadcast entries from the resulting real
+                # state (real interpolated position along a real route —
+                # see app/emergency/mission_manager.py).
+                mission_manager.tick(tick)
+                mission_events: list[Dict[str, Any]] = []
+                for mission in mission_manager.active_missions():
+                    lat, lng = mission_manager.current_position(mission, tick)
+                    on_site_remaining = None
+                    if mission.on_site_until_tick is not None:
+                        on_site_remaining = max(0.0, mission.on_site_until_tick - tick)
+                    mission_events.append(
+                        {
+                            "mission_id": mission.mission_id,
+                            "accident_id": mission.accident_id,
+                            "edge_id": mission.edge_id,
+                            "hospital_name": mission.hospital_name,
+                            "ambulance_id": mission.ambulance_id,
+                            "unit_number": mission.unit_number,
+                            "state": mission.state.value,
+                            "lat": lat,
+                            "lng": lng,
+                            "outbound_coords": [
+                                {"lat": c[0], "lng": c[1]} for c in mission.outbound.coords
+                            ],
+                            "return_coords": (
+                                [{"lat": c[0], "lng": c[1]} for c in mission.return_route.coords]
+                                if mission.return_route
+                                else None
+                            ),
+                            "signal_priority_available": mission.signal_priority_available,
+                            "on_site_seconds_remaining": on_site_remaining,
+                        }
+                    )
+
                 payload: Dict[str, Any] = {
                     "type": UpdateType.TRAFFIC.value,
                     "simulation_id": simulation_id,
@@ -445,6 +481,7 @@ class SimulationManager:
                     "traffic": traffic_events,
                     "vehicles": vehicle_events,
                     "accidents": accident_events,
+                    "emergency_missions": mission_events,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 

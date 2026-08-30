@@ -13,13 +13,13 @@ import LegendPanel from "@/components/map/LegendPanel";
 import TrafficKpiOverview from "@/components/traffic/TrafficKpiOverview";
 import CongestionBreakdown from "@/components/traffic/CongestionBreakdown";
 import AccidentPanel from "@/components/accident/AccidentPanel";
+import EmergencyStatusPanel from "@/components/emergency/EmergencyStatusPanel";
 import LoadingOverlay from "@/components/common/LoadingOverlay";
 import WsStatusBadge from "@/components/common/WsStatusBadge";
 
 import { ApplicationMode, IntelligenceMessage } from "@/types/common";
 import { RouteOption } from "@/types/route";
 import { AccidentSeverity } from "@/types/accident";
-import { Ambulance } from "@/types/ambulance";
 
 import { MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
 import { calculateRoutes } from "@/services/navigationApi";
@@ -44,17 +44,24 @@ export default function HomePage() {
     nextEtaMinutes: number;
     reason: string;
   } | null>(null);
-  const [ambulance, setAmbulance] = useState<Ambulance | null>(null);
   const [showComparison, setShowComparison] = useState(false);
 
   const [mapReady, setMapReady] = useState(false);
 
   // ── The one app-wide WebSocket connection, owned by TraffixProvider ──────
-  const { wsConnected, wsStep, riskByEdge, edges, vehicles: liveVehicles, accidents: liveAccidents } =
-    useTraffixContext();
-  // Real, backend-confirmed accidents — the UI focuses on the most recent
-  // one; the map itself still renders every active accident (see TrafficMap).
+  const {
+    wsConnected,
+    wsStep,
+    riskByEdge,
+    edges,
+    vehicles: liveVehicles,
+    accidents: liveAccidents,
+    missions: liveMissions,
+  } = useTraffixContext();
+  // Real, backend-confirmed accidents/missions — the UI focuses on the most
+  // recent one; the map itself still renders every active one (see TrafficMap).
   const primaryAccident = liveAccidents[0] ?? null;
+  const primaryMission = liveMissions[0] ?? null;
 
   // ── Live KPI + congestion breakdown, computed from the real edge stream ──
   const { kpi } = useLiveKpi(edges);
@@ -331,7 +338,7 @@ export default function HomePage() {
               <TrafficMap
                 activeRoute={selectedRoute ?? undefined}
                 accidents={liveAccidents}
-                ambulance={ambulance}
+                missions={liveMissions}
                 isNavigating={true}
                 riskByEdge={riskByEdge}
                 vehicles={liveVehicles}
@@ -367,6 +374,8 @@ export default function HomePage() {
               onSimulateAccident={handleSimulateAccident}
               activeAccidentRoadName={primaryAccident?.road_name || primaryAccident?.edge_id}
             />
+
+            <EmergencyStatusPanel mission={primaryMission} />
 
             <TopRoutes
               routes={routes}
