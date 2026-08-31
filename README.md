@@ -1,4 +1,4 @@
-# TrafficX
+# TraffiX
 
 ### Intelligent Traffic Simulation, Risk Prediction, Route Optimization & Real-Time Navigation
 
@@ -10,7 +10,7 @@
 [![XGBoost](https://img.shields.io/badge/ML-XGBoost-green)](https://xgboost.readthedocs.io/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-frontend-3178C6?logo=typescript)](https://www.typescriptlang.org/)
 
-> **TrafficX is an integrated traffic-intelligence platform connecting traffic data acquisition, SUMO simulation, machine learning, backend services, route optimization, interactive mapping, live navigation, incident handling, and emergency response — running end-to-end on the real Anna Nagar, Chennai road network.**
+> **TraffiX is an integrated traffic-intelligence platform connecting traffic data acquisition, SUMO simulation, machine learning, backend services, route optimization, interactive mapping, live navigation, incident handling, and emergency response — running end-to-end on the real Anna Nagar, Chennai road network.**
 
 ```
 DATA → SIMULATION → LEARNING → PREDICTION → OPTIMIZATION → VISUALIZATION → NAVIGATION → EMERGENCY RESPONSE
