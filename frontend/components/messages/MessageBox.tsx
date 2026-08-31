@@ -3,6 +3,7 @@
 import { IntelligenceMessage } from "../../types/common";
 import { Info, AlertTriangle, ShieldAlert, CheckCircle2, Cpu } from "lucide-react";
 import { MOCK_INITIAL_MESSAGES } from "../../lib/mockData";
+import { useTraffixContext } from "@/context/TraffixContext";
 
 interface MessageBoxProps {
   messages?: IntelligenceMessage[];
@@ -11,7 +12,11 @@ interface MessageBoxProps {
 export default function MessageBox({
   messages = MOCK_INITIAL_MESSAGES,
 }: MessageBoxProps) {
-  
+  // Real broadcast source (see hooks/useWebSocket.ts) — this badge used to
+  // say "SUMO Feed" unconditionally, even in mock mode.
+  const { dataSource } = useTraffixContext();
+  const feedLabel = dataSource === "sumo" ? "SUMO Feed" : dataSource === "mock" ? "Mock Feed" : "Connecting…";
+
   const getMessageIcon = (type: string) => {
     switch (type) {
       case "accident":
@@ -36,7 +41,7 @@ export default function MessageBox({
           LIVE TRAFFIC INTELLIGENCE
         </h3>
         <span className="text-[10px] font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded border border-sky-100">
-          SUMO Feed
+          {feedLabel}
         </span>
       </div>
 

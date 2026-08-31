@@ -1,129 +1,66 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { getWebSocketClient } from "../services/webSocketClient";
-import { fetchNetworkKpi, NetworkKpi } from "../services/trafficApi";
+import type { StreamEdge } from "./useWebSocket";
+import { computeTrafficAggregates, TrafficAggregates } from "../lib/trafficAggregates";
 
-// ── Live KPI hook — merges REST baseline + WS delta updates ──────────────────
-export function useLiveKpi(pollingIntervalMs = 5000, enabled = true) {
-  const [kpi, setKpi] = useState<NetworkKpi>({
-    activeVehicles: 1247,
-    avgSpeedKmh: 34.2,
-    networkHealthPct: 88,
-    activeIncidents: 0,
-    throughputVehPerHr: 1820,
-    congestionIndex: 0.62,
-  });
-  const [wsConnected, setWsConnected] = useState(false);
-  const [wsStep, setWsStep] = useState<number | undefined>(undefined);
-  const [isMockFeed, setIsMockFeed] = useState(false);
+// ── Live KPI hook — computed from the real WebSocket edge stream ─────────────
+// Previously polled a /traffic/kpi REST endpoint that never existed on the
+// backend and silently fell back to hardcoded numbers. There's no need for
+// a dedicated aggregate endpoint at all: the real per-edge snapshot is
+// already pushed to the client every second (see TraffixContext.tsx /
+// hooks/useWebSocket.ts) — this just derives the network-wide KPIs and
+// congestion breakdown from it (lib/trafficAggregates.ts), so the panel
+// updates exactly as often as the backend actually pushes new data.
+export function useLiveKpi(edges: StreamEdge[]) {
+  const [kpi, setKpi] = useState<TrafficAggregates>(() => computeTrafficAggregates(edges));
 
-  // Initial REST fetch
   useEffect(() => {
-    if (!enabled) return;
-    fetchNetworkKpi().then(setKpi).catch(() => {/* use default */});
-  }, [enabled]);
+    setKpi(computeTrafficAggregates(edges));
+  }, [edges]);
 
-  // Polling REST fallback
-  useEffect(() => {
-    if (!enabled) return;
-    const interval = setInterval(() => {
-      fetchNetworkKpi().then(setKpi).catch(() => {/* keep last */});
-    }, pollingIntervalMs);
-    return () => clearInterval(interval);
-  }, [pollingIntervalMs, enabled]);
-
-  // Legacy TraCI client is unused during the FastAPI simulation stream (Phase 2).
-  useEffect(() => {
-    const client = getWebSocketClient();
-
-    const unsubStatus = client.on<{ connected: boolean; mock?: boolean }>(
-      "connection_status",
-      (msg) => {
-        setWsConnected(msg.payload.connected);
-        setIsMockFeed(!!msg.payload.mock);
-      }
-    );
-
-    const unsubStep = client.on<{ step: number; vehicleCount: number }>(
-      "simulation_step",
-      (msg) => {
-        setWsStep(msg.payload.step);
-        setKpi((prev) => ({
-          ...prev,
-          activeVehicles: msg.payload.vehicleCount,
-        }));
-      }
-    );
-
-    const unsubTraffic = client.on<{
-      roadId: string;
-      density: number;
-      avgSpeed: number;
-    }>("traffic_update", (msg) => {
-      setKpi((prev) => ({
-        ...prev,
-        avgSpeedKmh: parseFloat(
-          ((prev.avgSpeedKmh * 0.8 + msg.payload.avgSpeed * 0.2)).toFixed(1)
-        ),
-        congestionIndex: parseFloat(
-          (msg.payload.density / 100).toFixed(2)
-        ),
-        networkHealthPct: Math.max(
-          50,
-          Math.round(100 - msg.payload.density * 0.5)
-        ),
-      }));
-    });
-
-    setWsConnected(client.isConnected);
-
-    return () => {
-      unsubStatus();
-      unsubStep();
-      unsubTraffic();
-    };
-  }, []);
-
-  return { kpi, wsConnected, wsStep, isMockFeed, setKpi };
+  return { kpi, setKpi };
 }
 
-// ── Live message feed hook — appends WS system_alert events ──────────────────
+// ── Live message feed hook ────────────────────────────────────────────────────
+// Previously also subscribed to a fabricated "system_alert" WS event from the
+// retired legacy client. The backend doesn't broadcast any alert/event stream
+// today (see FRONTEND_AUDIT.md §1.2) — messages are pushed explicitly by
+// real client-side events (e.g. route search, accident simulation) via
+// pushMessage() until a real backend event stream exists to wire up here.
 import { IntelligenceMessage } from "../types/common";
 
 export function useLiveMessages(initial: IntelligenceMessage[]) {
   const [messages, setMessages] = useState<IntelligenceMessage[]>(initial);
 
-  useEffect(() => {
-    const client = getWebSocketClient();
-
-    const unsub = client.on<{
-      severity: string;
-      text: string;
-      details?: string;
-    }>("system_alert", (msg) => {
-      const newMsg: IntelligenceMessage = {
-        id: `ws-${Date.now()}`,
-        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type:
-          msg.payload.severity === "critical"
-            ? "emergency"
-            : msg.payload.severity === "warning"
-            ? "warning"
-            : "info",
-        text: msg.payload.text,
-        details: msg.payload.details,
-        urgent: msg.payload.severity === "critical",
-      };
-      setMessages((prev) => [newMsg, ...prev].slice(0, 50));
-    });
-
-    return () => unsub();
-  }, []);
-
   const pushMessage = useCallback((msg: IntelligenceMessage) => {
     setMessages((prev) => [msg, ...prev].slice(0, 50));
   }, []);
 
-  return { messages, setMessages, pushMessage };
+  // Real acknowledge/dismiss state, driven by an actual user action (the
+  // /alerts page) — powers both that page and the header's unread badge
+  // from the same real event log, instead of two separate fake counts.
+  const acknowledgeMessage = useCallback((id: string) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, acknowledged: true } : m)));
+  }, []);
+
+  const dismissMessage = useCallback((id: string) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, dismissed: true } : m)));
+  }, []);
+
+  const acknowledgeAllMessages = useCallback(() => {
+    setMessages((prev) => prev.map((m) => ({ ...m, acknowledged: true })));
+  }, []);
+
+  const unreadCount = messages.filter((m) => !m.acknowledged && !m.dismissed).length;
+
+  return {
+    messages,
+    setMessages,
+    pushMessage,
+    acknowledgeMessage,
+    dismissMessage,
+    acknowledgeAllMessages,
+    unreadCount,
+  };
 }

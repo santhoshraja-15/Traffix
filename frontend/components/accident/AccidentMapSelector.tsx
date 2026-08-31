@@ -1,34 +1,45 @@
 "use client";
 
-import { useState } from "react";
-import { MapPin, X, Check, ShieldAlert } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { MapPin, X, Check, ShieldAlert, Search } from "lucide-react";
+import { loadRealLocations } from "@/services/navigationApi";
+import { LocationSuggestion } from "@/types/route";
 
 interface AccidentMapSelectorProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelectRoad: (roadId: string, roadName: string) => void;
+  onSelectRoad: (edgeId: string, roadName: string) => void;
 }
-
-const AVAILABLE_ROADS = [
-  { id: "road_anna_2", name: "Anna Salai Sec 2 (Teynampet Junction)" },
-  { id: "road_anna_3", name: "Anna Salai Sec 3 (Nandanam Crossing)" },
-  { id: "road_mount_1", name: "Mount Flyover Bypass (Saidapet)" },
-  { id: "road_ring_2", name: "Inner Ring Road (Guindy West)" },
-];
 
 export default function AccidentMapSelector({
   isOpen,
   onClose,
   onSelectRoad,
 }: AccidentMapSelectorProps) {
-  const [selected, setSelected] = useState(AVAILABLE_ROADS[0]);
+  const [locations, setLocations] = useState<LocationSuggestion[]>([]);
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<LocationSuggestion | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    loadRealLocations()
+      .then(setLocations)
+      .catch(() => setError("Anna Nagar location data unavailable."));
+  }, [isOpen]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return locations.slice(0, 8);
+    return locations.filter((l) => l.name.toLowerCase().includes(q)).slice(0, 8);
+  }, [query, locations]);
 
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
       <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-5 flex flex-col gap-4">
-        
+
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 pb-3">
           <div className="flex items-center gap-2">
@@ -39,7 +50,7 @@ export default function AccidentMapSelector({
               <h3 className="font-extrabold text-sm text-slate-900">
                 CHOOSE ACCIDENT LOCATION
               </h3>
-              <p className="text-xs text-slate-500">Select target SUMO road segment</p>
+              <p className="text-xs text-slate-500">A real road segment in the loaded Anna Nagar network</p>
             </div>
           </div>
           <button
@@ -50,14 +61,33 @@ export default function AccidentMapSelector({
           </button>
         </div>
 
+        {/* Search */}
+        <div className="relative">
+          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search a real street name..."
+            className="w-full pl-8 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-400"
+          />
+        </div>
+
+        {error && <p className="text-xs text-red-600 font-semibold">{error}</p>}
+
         {/* Road selection options */}
-        <div className="flex flex-col gap-2">
-          {AVAILABLE_ROADS.map((road) => {
-            const isChosen = selected.id === road.id;
+        <div className="flex flex-col gap-2 max-h-64 overflow-y-auto">
+          {filtered.length === 0 && !error && (
+            <p className="text-xs text-slate-400 text-center py-4">
+              {locations.length === 0 ? "Loading real network locations…" : "No matching street found."}
+            </p>
+          )}
+          {filtered.map((loc) => {
+            const isChosen = selected?.edge_id === loc.edge_id;
             return (
               <div
-                key={road.id}
-                onClick={() => setSelected(road)}
+                key={loc.edge_id}
+                onClick={() => setSelected(loc)}
                 className={`p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
                   isChosen
                     ? "bg-red-50/80 border-red-300 shadow-xs"
@@ -67,7 +97,7 @@ export default function AccidentMapSelector({
                 <div className="flex items-center gap-2.5">
                   <MapPin className={`w-4 h-4 ${isChosen ? "text-red-600" : "text-slate-400"}`} />
                   <span className={`text-xs font-bold ${isChosen ? "text-red-950" : "text-slate-700"}`}>
-                    {road.name}
+                    {loc.name}
                   </span>
                 </div>
                 {isChosen && <Check className="w-4 h-4 text-red-600 font-bold" />}
@@ -85,11 +115,13 @@ export default function AccidentMapSelector({
             Cancel
           </button>
           <button
+            disabled={!selected}
             onClick={() => {
-              onSelectRoad(selected.id, selected.name);
+              if (!selected) return;
+              onSelectRoad(selected.edge_id, selected.name);
               onClose();
             }}
-            className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold shadow-sm transition-all flex items-center gap-1.5"
+            className="px-4 py-2 rounded-lg bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:hover:bg-red-600 text-white text-xs font-bold shadow-sm transition-all flex items-center gap-1.5"
           >
             <ShieldAlert className="w-3.5 h-3.5" />
             <span>Confirm Location</span>

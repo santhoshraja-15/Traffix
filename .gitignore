@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 .env
+.env*.local
 cache/
 node_modules/
 .next/
@@ -11,4 +12,4 @@ node_modules/
 *.pkl
 *.pt
 *.onnx
-models/
+/models/

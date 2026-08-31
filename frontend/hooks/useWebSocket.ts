@@ -18,7 +18,8 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { API_BASE_URL, WS_BASE_URL } from "../lib/constants";
+import { API_BASE_URL, API_TIMEOUT_MS, WS_BASE_URL } from "../lib/constants";
+import { fetchWithTimeout } from "../services/api";
 
 // ── Shared stream types (exported — useSimulationStream re-exports these) ─────
 
@@ -26,6 +27,7 @@ export interface StreamEdge {
   edge_id: string;
   speed: number;
   vehicle_count: number;
+  stopped_vehicles: number;
   congestion: string;
   congestion_score: number;
   edge_cost: number;
@@ -33,6 +35,62 @@ export interface StreamEdge {
   risk_score: number;
   model?: string;
   source?: string;
+}
+
+/** One live vehicle position, as broadcast by SimulationManager (real TraCI
+ * data only — this array is empty whenever `source !== "sumo"`, since the
+ * mock sensor path has no individual vehicles to report). */
+export interface StreamVehicle {
+  id: string;
+  lat: number;
+  lng: number;
+  heading: number; // compass bearing, 0 = north, clockwise
+  speed_kmh: number;
+  edge_id: string;
+}
+
+/** A real, currently-active accident — see app/services/accident_service.py.
+ * lat/lng are null only if the reported edge_id isn't found in the graph
+ * (never a placeholder coordinate). */
+export interface StreamAccident {
+  accident_id: string;
+  edge_id: string;
+  severity: string;
+  road_name: string;
+  lat: number | null;
+  lng: number | null;
+  reported_at: string;
+}
+
+/** A real, currently-active emergency mission — see
+ * app/emergency/mission_manager.py. Position and route geometry are both
+ * real (interpolated along the real backend-computed route by real
+ * elapsed simulation ticks), never invented on the frontend. */
+export type MissionState =
+  | "ambulance_dispatched"
+  | "green_corridor_active"
+  | "en_route_to_accident"
+  | "ambulance_arrived"
+  | "on_site_response"
+  | "returning_to_hospital"
+  | "emergency_completed";
+
+export interface StreamMission {
+  mission_id: string;
+  accident_id: string;
+  edge_id: string;
+  hospital_name: string;
+  ambulance_id: string;
+  unit_number: string;
+  state: MissionState;
+  lat: number;
+  lng: number;
+  outbound_coords: { lat: number; lng: number }[];
+  return_coords: { lat: number; lng: number }[] | null;
+  signal_priority_available: boolean;
+  // Ticks remaining in the on-site hold, driven by the backend's own
+  // simulation tick counter — never a frontend setTimeout/wall clock.
+  on_site_seconds_remaining: number | null;
 }
 
 export interface SimulationStreamPayload {
@@ -44,6 +102,9 @@ export interface SimulationStreamPayload {
   model?: string;
   source?: string;
   traffic: StreamEdge[];
+  vehicles: StreamVehicle[];
+  accidents: StreamAccident[];
+  emergency_missions: StreamMission[];
   timestamp: string;
 }
 
@@ -60,7 +121,22 @@ const RECONNECT_MAX_MS   = 30_000;
 export interface UseTrafficSocketReturn {
   connected: boolean;
   riskByEdge: EdgeRiskMap;
+  /** The full latest per-edge traffic snapshot (all StreamEdge fields, not
+   * just risk) — for aggregate panels (KPI overview, congestion breakdown)
+   * that need more than the map's paint-color value. Same 1s throttle as
+   * riskByEdge/tick. */
+  edges: StreamEdge[];
+  vehicles: StreamVehicle[];
+  accidents: StreamAccident[];
+  missions: StreamMission[];
   tick: number | undefined;
+  /** The real broadcast source for this tick — "sumo" when real TraCI is
+   * connected, "mock" when SimulationManager is generating sensor data
+   * itself (see app/core/simulation_manager.py). Undefined before the
+   * first frame arrives. Never inferred from wsConnected — a mock-mode
+   * WebSocket connects successfully too, so "connected" alone can't tell
+   * these apart (see Header.tsx's connection badge). */
+  dataSource: string | undefined;
 }
 
 /**
@@ -72,7 +148,12 @@ export interface UseTrafficSocketReturn {
 export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
   const [connected, setConnected] = useState(false);
   const [riskByEdge, setRiskByEdge] = useState<EdgeRiskMap>({});
+  const [edges, setEdges] = useState<StreamEdge[]>([]);
+  const [vehicles, setVehicles] = useState<StreamVehicle[]>([]);
+  const [accidents, setAccidents] = useState<StreamAccident[]>([]);
+  const [missions, setMissions] = useState<StreamMission[]>([]);
   const [tick, setTick] = useState<number | undefined>(undefined);
+  const [dataSource, setDataSource] = useState<string | undefined>(undefined);
 
   // Refs — never trigger re-renders, safe to read inside closures.
   const wsRef          = useRef<WebSocket | null>(null);
@@ -100,7 +181,12 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
         next[edge.edge_id] = edge.risk_score;
       }
       setRiskByEdge(next);
+      setEdges(payload.traffic);
+      setVehicles(payload.vehicles ?? []);
+      setAccidents(payload.accidents ?? []);
+      setMissions(payload.emergency_missions ?? []);
       setTick(payload.tick);
+      setDataSource(payload.source);
     };
 
     throttleTimer.current = setInterval(flush, UI_THROTTLE_MS);
@@ -170,7 +256,12 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
 
     // Kick off simulation then open WS.
     // Fire-and-forget: if the simulation is already running the POST is a no-op.
-    fetch(`${API_BASE_URL}/simulation/start`, {
+    // Timeout-protected (fetchWithTimeout) rather than a raw fetch() — this
+    // call previously had no bound at all, so an unreachable backend (e.g.
+    // the configured port occupied by an unrelated process that accepts
+    // connections but never responds) would leave it pending forever and
+    // connect() — which opens the real WebSocket — would never run at all.
+    fetchWithTimeout(`${API_BASE_URL}/simulation/start`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -182,7 +273,7 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
           rainfall:        0.1,
         },
       }),
-    }).catch(() => {
+    }, API_TIMEOUT_MS).catch(() => {
       // Simulation start is optional; the socket still connects.
     }).finally(connect);
 
@@ -195,5 +286,5 @@ export function useTrafficSocket(simulationId: string): UseTrafficSocketReturn {
     };
   }, [simulationId]);
 
-  return { connected, riskByEdge, tick };
+  return { connected, riskByEdge, edges, vehicles, accidents, missions, tick, dataSource };
 }

@@ -11,11 +11,12 @@ payload with no per-client timing drift.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from app.core.websocket_manager import websocket_manager
 from app.models.traffic_models import TrafficUpdate
-from app.utils.constants import CongestionLevel, UpdateType
+from app.services.traffic_service import get_traffic_service
+from app.utils.constants import UpdateType
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -25,13 +26,25 @@ router = APIRouter(tags=["traffic"])
 
 @router.get("/traffic/{edge_id}", response_model=TrafficUpdate)
 async def get_traffic_state(edge_id: str) -> TrafficUpdate:
-    """Return a point-in-time snapshot of traffic state for a single edge."""
+    """
+    Real point-in-time snapshot of *edge_id*'s traffic state, from
+    traffic_state_store (populated every tick by SimulationManager — see
+    app/core/simulation_manager.py). 404s honestly if the edge hasn't been
+    seen yet (unknown edge_id, or no simulation has run) rather than
+    returning a plausible-looking fake value.
+    """
+    state = get_traffic_service().get_edge_state(edge_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No live traffic state for edge '{edge_id}' — start a simulation first.",
+        )
     return TrafficUpdate(
         type=UpdateType.TRAFFIC,
-        edge_id=edge_id,
-        speed=32.5,
-        vehicle_count=48,
-        congestion=CongestionLevel.MODERATE,
+        edge_id=state.edge_id,
+        speed=state.speed,
+        vehicle_count=state.vehicle_count,
+        congestion=state.congestion_level,
     )
 
 

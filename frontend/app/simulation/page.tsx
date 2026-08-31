@@ -1,176 +1,269 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
-import { SimulationScenario } from "@/types/simulation";
-import SimulationControls from "@/components/simulation/SimulationControls";
 import SimulationStatus from "@/components/simulation/SimulationStatus";
-import ScenarioSelector from "@/components/simulation/ScenarioSelector";
-import AccidentSimulator from "@/components/simulation/AccidentSimulator";
-import WsStatusBadge from "@/components/common/WsStatusBadge";
+import SimulationControls from "@/components/simulation/SimulationControls";
+import AccidentPanel from "@/components/accident/AccidentPanel";
 import { useTraffixContext } from "@/context/TraffixContext";
+import { useLiveKpi } from "@/hooks/useLiveData";
 import {
   startSimulation,
-  pauseSimulation,
   stopSimulation,
-  resetSimulation,
+  pauseSimulation,
+  resumeSimulation,
   stepSimulation,
-  setSimulationSpeed,
-  loadScenario,
 } from "@/services/simulationApi";
-import { Cpu } from "lucide-react";
+import { simulateAccident, resolveAccident } from "@/services/accidentApi";
+import { fetchNetworkTopology } from "@/services/networkApi";
+import { AccidentSeverity } from "@/types/accident";
+import { Cpu, ShieldAlert, ArrowRight, CheckCircle2 } from "lucide-react";
 
+/**
+ * Real Simulation Engine control page.
+ *
+ * Audited against app/api/simulation.py, app/core/simulation_manager.py,
+ * app/integrations/sumo_bridge.py, and app/integrations/sumo_network_loader.py
+ * before rewriting (see the Phase 13 commit for the full write-up). Real:
+ * start/stop/pause/resume/step of the one shared tick loop (the same
+ * simulation every page's live data already depends on — see
+ * hooks/useWebSocket.ts, which auto-starts it on first connect), and real
+ * accident injection (the same AccidentPanel/backend flow already proven
+ * on the main page and /emergency — not a second implementation). Pause/
+ * resume/step were added to SimulationManager's tick loop itself (a real
+ * flag it checks every iteration) after the user explicitly approved that
+ * specific backend addition — see the Phase 13 follow-up commit.
+ *
+ * Confirmed NOT real, and not faked here: a speed multiplier (no such
+ * mechanism exists in SimulationManager's tick loop) and live
+ * scenario/network switching (app/integrations/sumo_network_loader.py and
+ * sumo_bridge.py are both hardcoded to scenarios/medium — nothing reads
+ * the scenarios/low, high, or congested directories that exist on disk).
+ */
 export default function SimulationPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
-  const [scenario, setScenario] = useState<SimulationScenario>("medium");
-  const [isRunning, setIsRunning] = useState(true);
-  const [speedMultiplier, setSpeedMultiplierState] = useState(1.0);
-  const [currentStep, setCurrentStep] = useState(420);
-  const [stopped, setStopped] = useState(false);
+  const { wsConnected, wsStep, dataSource, edges, accidents: liveAccidents } = useTraffixContext();
+  const { kpi } = useLiveKpi(edges);
 
-  // Phase 16: shared WS context
-  const { wsConnected, wsStep, isMockFeed } = useTraffixContext();
+  const [busy, setBusy] = useState(false);
+  const [controlError, setControlError] = useState<string | null>(null);
+  // Real — set only from the response of a real pause/resume/step call,
+  // never inferred or assumed.
+  const [paused, setPaused] = useState(false);
+  const [networkEdgeCount, setNetworkEdgeCount] = useState<number | null>(null);
+  const [networkArea, setNetworkArea] = useState<string | null>(null);
 
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Real, derived "ticks arriving recently" signal — NOT the same as
+  // wsConnected. Confirmed live that the WebSocket socket itself stays
+  // open for tens of seconds after the tick loop actually stops (the
+  // backend only closes it once idle, separately from the loop
+  // cancelling), so gating Start/Stop on wsConnected left Start
+  // permanently stuck showing "Running" after a real Stop. This instead
+  // tracks whether the real tick counter has actually moved recently.
+  const [looksActive, setLooksActive] = useState(false);
+  const lastTickRef = useRef<{ value: number; at: number }>({ value: -1, at: 0 });
 
-  // Local tick (UI-driven) — syncs with WS step when connected
   useEffect(() => {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (isRunning && !stopped) {
-      intervalRef.current = setInterval(() => {
-        setCurrentStep((prev) => prev + 1);
-      }, Math.max(100, 1000 / speedMultiplier));
+    if (wsStep !== lastTickRef.current.value) {
+      lastTickRef.current = { value: wsStep, at: Date.now() };
     }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [isRunning, speedMultiplier, stopped]);
+  }, [wsStep]);
 
-  // Sync step from WS when connected
   useEffect(() => {
-    if (wsConnected && wsStep > 0) {
-      setCurrentStep(wsStep);
+    const interval = setInterval(() => {
+      setLooksActive(Date.now() - lastTickRef.current.at < 3000);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    fetchNetworkTopology()
+      .then((topo) => {
+        setNetworkEdgeCount(topo.metadata?.edges ?? null);
+        setNetworkArea(topo.metadata?.area ?? "Anna Nagar, Chennai");
+      })
+      .catch(() => {
+        /* honest: leaves the "Loading real network metadata…" state visible */
+      });
+  }, []);
+
+  const handleStart = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      await startSimulation();
+      // A (re)start always begins unpaused, per SimulationManager.start().
+      setPaused(false);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to start the simulation.");
+    } finally {
+      setBusy(false);
     }
-  }, [wsStep, wsConnected]);
-
-  // ── API-wired lifecycle handlers ──────────────────────────────────────────
-  const handleToggle = async () => {
-    if (stopped) return;
-    const wasRunning = isRunning;
-    setIsRunning(!wasRunning);
-    if (wasRunning) {
-      await pauseSimulation();
-    } else {
-      await startSimulation(scenario);
-    }
-  };
-
-  const handleReset = async () => {
-    setStopped(false);
-    setIsRunning(true);
-    setCurrentStep(0);
-    await resetSimulation();
-    await startSimulation(scenario);
-  };
-
-  const handleStep = async () => {
-    if (isRunning || stopped) return;
-    const res = await stepSimulation(1);
-    if (res.newStep > 0) setCurrentStep(res.newStep);
-    else setCurrentStep((prev) => prev + 1);
   };
 
   const handleStop = async () => {
-    setStopped(true);
-    setIsRunning(false);
-    await stopSimulation();
+    setBusy(true);
+    setControlError(null);
+    try {
+      await stopSimulation();
+      setPaused(false);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to stop the simulation.");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleSpeedChange = async (v: number) => {
-    setSpeedMultiplierState(v);
-    await setSimulationSpeed(v);
+  const handlePause = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      const result = await pauseSimulation();
+      setPaused(result.paused);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to pause the simulation.");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const handleScenarioChange = async (s: SimulationScenario) => {
-    setScenario(s);
-    setCurrentStep(0);
-    await loadScenario(s);
-    if (isRunning) await startSimulation(s);
+  const handleResume = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      const result = await resumeSimulation();
+      setPaused(result.paused);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to resume the simulation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleStep = async () => {
+    setBusy(true);
+    setControlError(null);
+    try {
+      await stepSimulation();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : "Failed to step the simulation.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Real accident injection — the exact same backend flow AccidentPanel
+  // already drives on the main page and /emergency (POST /accidents,
+  // real capacity reduction). Not a second, separate implementation.
+  const handleSimulateAccident = async (edgeId: string, roadName: string, severity: AccidentSeverity) => {
+    await simulateAccident(edgeId, severity);
+  };
+
+  const handleResolveAccident = async (accidentId: string) => {
+    await resolveAccident(accidentId);
   };
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1400px] w-full mx-auto p-6 flex flex-col gap-6">
-        {/* Page title */}
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
-              <Cpu className="w-6 h-6 text-sky-500" />
-              SUMO Simulation Command Center
-            </h1>
-            <p className="text-sm text-slate-500 mt-1">
-              Control SUMO TraCI lifecycle · Load OSM network scenarios · Monitor real-time network statistics
-            </p>
-          </div>
-
-          {/* Status badges */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <WsStatusBadge connected={wsConnected} mock={isMockFeed} step={wsStep} />
-            <div
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-xs font-extrabold ${
-                stopped
-                  ? "bg-slate-100 border-slate-300 text-slate-600"
-                  : isRunning
-                  ? "bg-emerald-50 border-emerald-300 text-emerald-800"
-                  : "bg-amber-50 border-amber-300 text-amber-800"
-              }`}
-            >
-              <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  stopped
-                    ? "bg-slate-400"
-                    : isRunning
-                    ? "bg-emerald-500 animate-pulse"
-                    : "bg-amber-500"
-                }`}
-              />
-              {stopped ? "STOPPED" : isRunning ? "RUNNING" : "PAUSED"}
-            </div>
-          </div>
+        <div>
+          <h1 className="text-2xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2">
+            <Cpu className="w-6 h-6 text-sky-500" />
+            Simulation Engine
+          </h1>
+          <p className="text-sm text-slate-500 mt-1">
+            Real control over the live SUMO/mock tick loop — the same simulation the entire app
+            reads from, not a separate demo.
+          </p>
         </div>
 
-        {/* Top row: Status + Controls */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Top row: real engine status + real lifecycle controls */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
           <SimulationStatus
-            isRunning={isRunning && !stopped}
-            currentStep={currentStep}
-            speedMultiplier={speedMultiplier}
-            scenario={scenario}
-            traciConnected={wsConnected}
+            wsConnected={wsConnected}
+            dataSource={dataSource}
+            tick={wsStep}
+            activeVehicles={kpi.activeVehicles}
+            avgSpeedKmh={kpi.avgSpeedKmh}
+            networkHealthPct={kpi.networkHealthPct}
+            activeIncidents={liveAccidents.length}
+            networkEdgeCount={networkEdgeCount}
+            networkArea={networkArea}
           />
           <SimulationControls
-            isRunning={isRunning && !stopped}
-            speedMultiplier={speedMultiplier}
-            currentStep={currentStep}
-            onToggle={handleToggle}
-            onReset={handleReset}
-            onStep={handleStep}
+            looksActive={looksActive}
+            paused={paused}
+            busy={busy}
+            error={controlError}
+            onStart={handleStart}
             onStop={handleStop}
-            onSpeedChange={handleSpeedChange}
+            onPause={handlePause}
+            onResume={handleResume}
+            onStep={handleStep}
           />
         </div>
 
-        {/* Bottom row: Scenario Selector + Accident Injector */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <ScenarioSelector scenario={scenario} onSelect={handleScenarioChange} />
-          <AccidentSimulator
-            scenario={scenario}
-            isRunning={isRunning && !stopped}
-            currentStep={currentStep}
+        {/* Real accident injection — reuses the proven AccidentPanel/backend
+            flow, not a duplicate fake implementation. */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+          <AccidentPanel
+            onSimulateAccident={handleSimulateAccident}
+            activeAccidentRoadName={liveAccidents[0]?.road_name || liveAccidents[0]?.edge_id}
           />
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex flex-col gap-3">
+            <h3 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-red-500" />
+              Active Accidents ({liveAccidents.length})
+            </h3>
+            {liveAccidents.length === 0 ? (
+              <p className="text-xs text-slate-400">No active accidents right now.</p>
+            ) : (
+              <div className="flex flex-col gap-1.5">
+                {liveAccidents.slice(0, 3).map((a) => (
+                  <div key={a.accident_id} className="flex items-center justify-between text-xs p-2 bg-red-50/60 border border-red-100 rounded-lg gap-2">
+                    <div className="min-w-0">
+                      <span className="font-bold text-red-900">{a.road_name || a.edge_id}</span>{" "}
+                      <span className="text-red-700 uppercase font-bold">{a.severity}</span>
+                    </div>
+                    <button
+                      onClick={() => handleResolveAccident(a.accident_id)}
+                      className="shrink-0 px-2 py-1 bg-white hover:bg-red-100 text-red-700 border border-red-300 rounded-lg font-bold transition-all"
+                    >
+                      Resolve
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <Link
+              href="/emergency"
+              className="mt-auto self-start flex items-center gap-1.5 text-xs font-bold text-sky-600 hover:text-sky-800 transition-all"
+            >
+              Full accident &amp; mission management
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          </div>
+        </div>
+
+        {/* Honest disclosure — scenario/network switching genuinely doesn't
+            exist in this deployment (see the audit in this file's own doc
+            comment above), so no interactive-looking control is shown for
+            it. Real scenario directories (low/medium/high/congested) exist
+            on disk but nothing in the backend reads them. */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5 flex items-start gap-3">
+          <CheckCircle2 className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+          <div className="text-xs text-slate-500">
+            <span className="font-bold text-slate-700">Scenario / network switching isn&apos;t available.</span>{" "}
+            This deployment&apos;s routing graph and (when connected) TraCI session are both fixed
+            to the <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">scenarios/medium</code> network —
+            neither the graph loader nor the SUMO bridge reads the <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">low</code>,{" "}
+            <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">high</code>, or{" "}
+            <code className="text-[11px] bg-slate-100 px-1 py-0.5 rounded">congested</code> scenario files that exist
+            on disk. Switching between them live would need real backend work, not a frontend control.
+          </div>
         </div>
       </main>
     </div>

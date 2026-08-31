@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Header from "@/components/common/Header";
 import LocationSearch from "@/components/navigation/LocationSearch";
 import NavigationBar from "@/components/navigation/NavigationBar";
@@ -13,157 +13,400 @@ import LegendPanel from "@/components/map/LegendPanel";
 import TrafficKpiOverview from "@/components/traffic/TrafficKpiOverview";
 import CongestionBreakdown from "@/components/traffic/CongestionBreakdown";
 import AccidentPanel from "@/components/accident/AccidentPanel";
+import EmergencyStatusPanel from "@/components/emergency/EmergencyStatusPanel";
 import LoadingOverlay from "@/components/common/LoadingOverlay";
 import WsStatusBadge from "@/components/common/WsStatusBadge";
 
-import { ApplicationMode, IntelligenceMessage } from "@/types/common";
 import { RouteOption } from "@/types/route";
-import { Accident, AccidentSeverity } from "@/types/accident";
-import { Ambulance } from "@/types/ambulance";
+import { AccidentSeverity } from "@/types/accident";
 
-import { MOCK_ROUTES, MOCK_INITIAL_MESSAGES } from "@/lib/mockData";
+import { buildTurnInstructions } from "@/lib/turnInstructions";
 import { calculateRoutes } from "@/services/navigationApi";
-import { simulateAccident } from "@/services/accidentApi";
-import { useLiveKpi, useLiveMessages } from "@/hooks/useLiveData";
-import { useSimulationStream } from "@/hooks/useSimulationStream";
-import { CheckCircle2, ShieldAlert } from "lucide-react";
+import { simulateAccident, resolveAccident } from "@/services/accidentApi";
+import { useLiveKpi } from "@/hooks/useLiveData";
+import { useTraffixContext } from "@/context/TraffixContext";
+import {
+  useRouteReoptimization,
+  RouteUpdateEvent,
+  EmergencyZoneWarningEvent,
+} from "@/hooks/useRouteReoptimization";
+import { API_ORIGIN } from "@/lib/constants";
+import { fetchHealth } from "@/services/networkApi";
+import { useJourneySimulation } from "@/hooks/useJourneySimulation";
+import { CheckCircle2, ShieldAlert, RefreshCw, Flag } from "lucide-react";
 
 export default function HomePage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
-  const [routes, setRoutes] = useState<RouteOption[]>(MOCK_ROUTES);
-  const [selectedRoute, setSelectedRoute] = useState<RouteOption>(MOCK_ROUTES[0]);
+  const [routes, setRoutes] = useState<RouteOption[]>([]);
+  const [selectedRoute, setSelectedRoute] = useState<RouteOption | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [searchStepText, setSearchStepText] = useState("");
   const [shortestRouteNotice, setShortestRouteNotice] = useState<string | null>(null);
-  const [accident, setAccident] = useState<Accident | null>(null);
-  const [ambulance, setAmbulance] = useState<Ambulance | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [activeSearch, setActiveSearch] = useState<{ origin: string; destination: string } | null>(null);
+  const [routeUpdateNotice, setRouteUpdateNotice] = useState<{
+    previousEtaMinutes: number;
+    nextEtaMinutes: number;
+    reason: string;
+    isEmergencyZone: boolean;
+  } | null>(null);
+  // A real, currently-active accident sits on the user's active route, but
+  // the backend genuinely found nothing faster than the ETA already
+  // promised (an accident only ever makes the area worse) — honest warning,
+  // never a fabricated "we rerouted you" claim. See useRouteReoptimization's
+  // EmergencyZoneWarningEvent doc comment.
+  const [zoneWarning, setZoneWarning] = useState<{ severity: string; roadName: string } | null>(null);
+
+  // ── Journey progress — real elapsed time only, never a fabricated
+  // position/distance (see JourneyMetrics.tsx's doc comment: no backend
+  // capability exists to track an ordinary user's live position along a
+  // route, unlike SUMO vehicles or the emergency-mission system). ─────────
+  const [journeyStartedAt, setJourneyStartedAt] = useState<number | null>(null);
+  const lastJourneyRouteId = useRef<string | undefined>(undefined);
   const [showComparison, setShowComparison] = useState(false);
 
   const [mapReady, setMapReady] = useState(false);
 
-  // ── Phase 15: Live KPI from WebSocket + REST polling ────────────────────
-  const { kpi, wsConnected, wsStep, isMockFeed, setKpi } = useLiveKpi(5000, mapReady);
+  // ── The one app-wide WebSocket connection, owned by TraffixProvider ──────
+  const {
+    wsConnected,
+    wsStep,
+    dataSource,
+    riskByEdge,
+    edges,
+    vehicles: liveVehicles,
+    accidents: liveAccidents,
+    missions: liveMissions,
+    messages,
+    pushMessage,
+  } = useTraffixContext();
+  // Real, backend-confirmed accidents/missions — the UI focuses on the most
+  // recent one; the map itself still renders every active one (see TrafficMap).
+  const primaryAccident = liveAccidents[0] ?? null;
+  const primaryMission = liveMissions[0] ?? null;
 
-  // ── Phase 2: FastAPI simulation stream (starts only after baseline map) ─
-  const { connected: simConnected, riskByEdge, tick: simTick } = useSimulationStream(mapReady);
+  // Real "next instruction" — derived entirely from the active route's own
+  // geometry and real ordered street names (lib/turnInstructions.ts). There
+  // is no live GPS feed for the person planning a route here, so this is
+  // the route's first real maneuver from its start, not a live position
+  // update — never the fabricated "Turn right onto Anna Salai Direct"
+  // default NavigationBar used to render unconditionally.
+  const nextInstruction = useMemo(() => {
+    if (!selectedRoute) return undefined;
+    const steps = buildTurnInstructions(selectedRoute.coordinates, selectedRoute.roadNames);
+    const first = steps[0];
+    if (!first) return undefined;
+    return {
+      ...first,
+      timeSeconds:
+        selectedRoute.averageSpeedKmh > 0
+          ? Math.round((first.distanceMeters / 1000 / selectedRoute.averageSpeedKmh) * 3600)
+          : 0,
+    };
+  }, [selectedRoute]);
 
-  // ── Phase 15: Live intelligence message feed ─────────────────────────────
-  const { messages, pushMessage } = useLiveMessages(MOCK_INITIAL_MESSAGES);
+  // ── Live KPI + congestion breakdown, computed from the real edge stream ──
+  const { kpi } = useLiveKpi(edges);
+
+  // Real active-journey vehicle position/progress — real route geometry +
+  // real elapsed time + real live per-edge traffic, never a fabricated
+  // simulation. See hooks/useJourneySimulation.ts's doc comment.
+  const journey = useJourneySimulation(selectedRoute, journeyStartedAt, edges);
+  const journeyJustArrived = useRef(false);
+  useEffect(() => {
+    if (journey.arrived && !journeyJustArrived.current) {
+      journeyJustArrived.current = true;
+      pushMessage({
+        id: `msg-${Date.now()}-arrived`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "success",
+        text: "🏁 Destination reached",
+        details: selectedRoute ? `Arrived via ${selectedRoute.name}.` : undefined,
+      });
+    }
+    if (!journey.arrived) journeyJustArrived.current = false;
+  }, [journey.arrived, selectedRoute, pushMessage]);
+
+  // Real "rescue success" notice — fires once per mission, exactly when its
+  // real state actually transitions to emergency_completed (never guessed,
+  // never re-fired on every render while it stays completed).
+  const seenCompletedMissions = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const m of liveMissions) {
+      if (m.state === "emergency_completed" && !seenCompletedMissions.current.has(m.mission_id)) {
+        seenCompletedMissions.current.add(m.mission_id);
+        pushMessage({
+          id: `msg-${Date.now()}-rescue-${m.mission_id}`,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+          type: "success",
+          text: "✅ Rescue completed",
+          details: `${m.unit_number} completed the mission from ${m.hospital_name} and returned to service.`,
+        });
+      }
+    }
+  }, [liveMissions, pushMessage]);
 
   useEffect(() => {
     if (!mapReady) return;
-    fetch("http://localhost:8000/health")
-      .then((res) => res.json())
+    // Timeout-protected (see services/networkApi.ts::fetchHealth) — this
+    // used to be its own raw fetch() with no bound, duplicating
+    // fetchHealth() while also lacking its timeout fix.
+    fetchHealth()
       .then((data) => {
         console.log("[TRAFFIX] /health", data);
+        pushMessage({
+          id: `msg-${Date.now()}-health`,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+          type: "info",
+          text: "Backend Connected",
+          details: `TRAFFIX API v${data.version ?? "?"} reachable at ${API_ORIGIN}.`,
+        });
       })
       .catch(() => {
         console.log("[TRAFFIX] /health not reachable yet");
+        pushMessage({
+          id: `msg-${Date.now()}-health-err`,
+          timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+          type: "warning",
+          text: "Backend Offline",
+          details: `Could not reach ${API_ORIGIN}/health.`,
+          urgent: true,
+        });
       });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady]);
 
-  // ── Phase 4: Route Optimization Workflow ─────────────────────────────────
+  // ── Real system-level connect/disconnect notice — pushed only on an
+  // actual state transition (never spammy re-pushes while steady), using
+  // the same wsConnected flag the status badge already reflects.
+  const prevWsConnected = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (prevWsConnected.current === null) {
+      prevWsConnected.current = wsConnected;
+      return;
+    }
+    if (prevWsConnected.current === wsConnected) return;
+    prevWsConnected.current = wsConnected;
+    pushMessage({
+      id: `msg-${Date.now()}-ws`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "system",
+      text: wsConnected ? "Realtime stream connected" : "Realtime stream disconnected",
+      details: wsConnected
+        ? "Live simulation WebSocket reconnected — map and KPIs resuming."
+        : "Live simulation WebSocket dropped — attempting to reconnect.",
+      urgent: !wsConnected,
+    });
+  }, [wsConnected, pushMessage]);
+
+  // Selecting a DIFFERENT route the user chose themselves (a new search, or
+  // picking an alternate from TopRoutes/RouteComparison) ends any
+  // in-progress journey — starting a journey is a real, deliberate action
+  // tied to a specific route. A REROUTE (the backend automatically
+  // recomputing the active route — see useRouteReoptimization below) is
+  // different: the journey continues on the new route with its
+  // already-covered distance preserved (rerouteInProgress, set by
+  // handleRouteUpdated just before it swaps the route) — "smoothly
+  // transition onto the new route... never teleport the vehicle" per the
+  // active-navigation spec.
+  const rerouteInProgress = useRef(false);
+  useEffect(() => {
+    if (selectedRoute?.id !== lastJourneyRouteId.current) {
+      lastJourneyRouteId.current = selectedRoute?.id;
+      if (rerouteInProgress.current) {
+        rerouteInProgress.current = false;
+        return; // preserve journeyStartedAt — useJourneySimulation carries the distance forward
+      }
+      setJourneyStartedAt(null);
+    }
+  }, [selectedRoute?.id]);
+
+  // Real elapsed time, distance, speed, ETA and position all come from
+  // useJourneySimulation above (one real animation loop) — no separate
+  // ticking timer here, per the active-navigation spec's explicit "do not
+  // introduce a second competing journey timer."
+  const handleStartJourney = () => {
+    if (!selectedRoute) return;
+    setJourneyStartedAt(Date.now());
+    pushMessage({
+      id: `msg-${Date.now()}-journey-start`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "system",
+      text: "Navigation started",
+      details: `Journey started on ${selectedRoute.name}.`,
+    });
+  };
+
+  // ── FROM/TO routing — real backend request, no scripted/fake steps ───────
   const handleSearch = async (origin: string, destination: string) => {
     setIsSearching(true);
     setShortestRouteNotice(null);
+    setSearchError(null);
+    setSearchStepText("Finding shortest route...");
 
-    setSearchStepText("Step 1/3: Mapping locations to SUMO network nodes...");
-    pushMessage({
-      id: `msg-${Date.now()}-1`,
-      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: "info",
-      text: `Resolving locations: ${origin} → ${destination}`,
-      details: "Mapping geographic coordinates to SUMO edge IDs...",
-    });
-
-    setTimeout(() => {
-      setSearchStepText("Step 2/3: Shortest topological path found...");
-      setShortestRouteNotice("Shortest topological route found: 4.2 km (~12 min)");
-      pushMessage({
-        id: `msg-${Date.now()}-2`,
-        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type: "routing",
-        text: "Shortest Route Found",
-        details: "Topological shortest path calculated via Anna Salai Direct.",
-      });
-    }, 600);
-
-    setTimeout(() => {
-      setSearchStepText("Step 3/3: Evaluating XGBoost risk & live TraCI traffic...");
-      pushMessage({
-        id: `msg-${Date.now()}-3`,
-        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type: "system",
-        text: "Analyzing Live Traffic & XGBoost Risk...",
-        details: "Evaluating congestion, speed vectors, and risk exposure scores.",
-      });
-    }, 1200);
-
-    setTimeout(async () => {
-      const result = await calculateRoutes(origin, destination);
+    try {
+      const result = await calculateRoutes(origin, destination, riskByEdge);
       setRoutes(result.optimalRoutes);
       setSelectedRoute(result.recommendedRoute);
       setShowComparison(true);
-
+      setRouteUpdateNotice(null);
+      setActiveSearch({ origin, destination }); // enables continuous re-evaluation, see below
+      setShortestRouteNotice(
+        `Route found: ${result.recommendedRoute.distanceKm.toFixed(1)} km (~${Math.round(
+          result.recommendedRoute.etaMinutes
+        )} min)`
+      );
       pushMessage({
-        id: `msg-${Date.now()}-4`,
+        id: `msg-${Date.now()}-route`,
         timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
         type: "success",
         text: "Optimal Route Selected: " + result.recommendedRoute.name,
         details: result.recommendedRoute.reasoning,
       });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Route request failed.";
+      setSearchError(message);
+      setRoutes([]);
+      setSelectedRoute(null);
+      setActiveSearch(null);
+      setShowComparison(false);
+      pushMessage({
+        id: `msg-${Date.now()}-err`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "warning",
+        text: "Route request failed",
+        details: message,
+        urgent: true,
+      });
+    } finally {
+      setSearchStepText("");
       setIsSearching(false);
-    }, 1800);
+    }
   };
 
-  // ── Phase 5: Accident Simulation & Dynamic Rerouting ─────────────────────
+  // ── Continuous rerouting: while a route is active, real live risk along
+  // its own edges is watched and the backend is asked to re-evaluate only
+  // when that signal has moved meaningfully — see hooks/useRouteReoptimization.ts.
+  const handleRouteUpdated = ({ previous, result, reason, isEmergencyZone }: RouteUpdateEvent) => {
+    setRoutes(result.optimalRoutes);
+    // This is an automatic reroute of the already-active route, not a new
+    // user pick — preserve the in-progress journey (see the reset-effect
+    // above) rather than resetting it to a fresh, unstarted state.
+    if (journeyStartedAt !== null) rerouteInProgress.current = true;
+    setSelectedRoute(result.recommendedRoute);
+    setRouteUpdateNotice({
+      previousEtaMinutes: previous.etaMinutes,
+      nextEtaMinutes: result.recommendedRoute.etaMinutes,
+      reason,
+      isEmergencyZone,
+    });
+    pushMessage({
+      id: `msg-${Date.now()}-reroute`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: isEmergencyZone ? "emergency" : "routing",
+      text: isEmergencyZone ? "⚠ EMERGENCY ZONE AHEAD" : "ROUTE UPDATED",
+      details: reason,
+      urgent: isEmergencyZone,
+    });
+  };
+
+  const handleEmergencyZoneWarning = ({ accident }: EmergencyZoneWarningEvent) => {
+    setZoneWarning({ severity: accident.severity, roadName: accident.road_name });
+    pushMessage({
+      id: `msg-${Date.now()}-zone-warning`,
+      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+      type: "emergency",
+      text: "⚠ ACTIVE ACCIDENT ON YOUR ROUTE",
+      details: `${accident.road_name} — ${accident.severity.toUpperCase()} severity. No faster alternative was found; continue with caution.`,
+      urgent: true,
+    });
+  };
+
+  useRouteReoptimization({
+    active: !!activeSearch && !!selectedRoute,
+    origin: activeSearch?.origin ?? "",
+    destination: activeSearch?.destination ?? "",
+    currentRoute: selectedRoute,
+    riskByEdge,
+    accidents: liveAccidents,
+    onRouteUpdated: handleRouteUpdated,
+    onEmergencyZoneWarning: handleEmergencyZoneWarning,
+  });
+
+  // Auto-dismiss the ROUTE UPDATED toast after a few seconds, per
+  // ANIMATED_EFFECTS.md §3 ("a short ROUTE UPDATED toast/badge").
+  useEffect(() => {
+    if (!routeUpdateNotice) return;
+    const t = setTimeout(() => setRouteUpdateNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [routeUpdateNotice]);
+
+  useEffect(() => {
+    if (!zoneWarning) return;
+    const t = setTimeout(() => setZoneWarning(null), 8000);
+    return () => clearTimeout(t);
+  }, [zoneWarning]);
+
+  // ── Accident detection — reports a real accident to the backend, which
+  // applies a genuine capacity reduction to the affected edge. The resulting
+  // rise in real congestion/risk (visible within ~1s on the next simulation
+  // tick) is what actually drives everything downstream: road coloring,
+  // the KPI panel, and — if the active route uses that edge — a real
+  // ROUTE UPDATED via hooks/useRouteReoptimization.ts above. Nothing here
+  // fabricates a reroute; the real pipeline does the work.
   const handleSimulateAccident = async (
-    roadId: string,
+    edgeId: string,
     roadName: string,
     severity: AccidentSeverity
   ) => {
-    const newAccident = await simulateAccident(roadId, severity);
-    setAccident(newAccident);
-
-    // Degrade KPI live
-    setKpi((prev) => ({
-      ...prev,
-      activeIncidents: prev.activeIncidents + 1,
-      networkHealthPct: Math.max(40, prev.networkHealthPct - 24),
-      congestionIndex: Math.min(1, prev.congestionIndex + 0.2),
-    }));
-
-    pushMessage({
-      id: `msg-${Date.now()}-acc`,
-      timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-      type: "accident",
-      text: "⚠ ACCIDENT DETECTED",
-      details: `Major bottleneck on ${roadName}. Route blocked. Recalculating alternatives...`,
-      urgent: true,
-    });
-
-    setTimeout(() => {
-      const reroutedRoutes: RouteOption[] = [
-        { ...MOCK_ROUTES[1], isRecommended: true, reasoning: "Bypasses severe accident at Teynampet Junction via Mount Flyover." },
-        { ...MOCK_ROUTES[2], isRecommended: false },
-        { ...MOCK_ROUTES[0], congestion: "congested", riskScore: 0.95, score: 12.0, isRecommended: false, reasoning: "BLOCKED by active multi-vehicle accident." },
-      ];
-      setRoutes(reroutedRoutes);
-      setSelectedRoute(reroutedRoutes[0]);
-
+    try {
+      await simulateAccident(edgeId, severity);
       pushMessage({
-        id: `msg-${Date.now()}-reroute`,
+        id: `msg-${Date.now()}-acc`,
         timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
-        type: "routing",
-        text: "Traffic Rerouted: Mount Flyover Bypass Selected",
-        details: "Navigation automatically updated to avoid high-risk bottleneck.",
+        type: "accident",
+        text: "⚠ ACCIDENT DETECTED",
+        details: `${severity} severity incident on ${roadName}. Backend is recalculating live risk/congestion for the affected road.`,
+        urgent: true,
       });
-    }, 1000);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to report the accident.";
+      pushMessage({
+        id: `msg-${Date.now()}-acc-err`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "warning",
+        text: "Accident report failed",
+        details: message,
+        urgent: true,
+      });
+    }
+  };
+
+  const handleResolveAccident = async (accidentId: string) => {
+    try {
+      await resolveAccident(accidentId);
+      pushMessage({
+        id: `msg-${Date.now()}-acc-resolved`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "success",
+        text: "Accident resolved",
+        details: "The affected road's capacity has been restored.",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to resolve the accident.";
+      pushMessage({
+        id: `msg-${Date.now()}-acc-resolve-err`,
+        timestamp: new Date().toLocaleTimeString("en-IN", { hour12: false }),
+        type: "warning",
+        text: "Could not resolve accident",
+        details: message,
+        urgent: true,
+      });
+    }
   };
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} systemConnected={simConnected || wsConnected} />
+      <Header />
 
       <main className="flex-1 max-w-[1920px] w-full mx-auto p-4 flex flex-col gap-3 relative">
 
@@ -174,34 +417,28 @@ export default function HomePage() {
           />
         )}
 
-        {/* Phase 15: WS status bar */}
+        {/* WS status bar — reflects the one real app-wide connection */}
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
-            <WsStatusBadge
-              connected={simConnected || wsConnected}
-              mock={isMockFeed && !simConnected}
-              step={simTick ?? wsStep}
-            />
-            {simConnected && (
+            <WsStatusBadge connected={wsConnected} step={wsStep} mock={dataSource === "mock"} />
+            {wsConnected && (
               <span className="text-[10px] font-semibold text-slate-400">
                 FastAPI simulation stream — map colors throttled to 1s
               </span>
             )}
           </div>
-          {simTick !== undefined && (
-            <span className="text-[10px] font-bold text-slate-400 tabular-nums">
-              Sim tick: {simTick.toLocaleString()}
-            </span>
-          )}
+          <span className="text-[10px] font-bold text-slate-400 tabular-nums">
+            Sim tick: {wsStep.toLocaleString()}
+          </span>
         </div>
 
-        {/* Phase 2: Traffic KPI — now driven by live useLiveKpi */}
+        {/* Traffic KPI overview — computed live from the real WebSocket edge stream */}
         <TrafficKpiOverview
           vehicleCount={kpi.activeVehicles}
           averageSpeedKmh={kpi.avgSpeedKmh}
-          stoppedVehicles={accident ? 28 : 12}
+          stoppedVehicles={kpi.stoppedVehicles}
           networkHealthIndex={kpi.networkHealthPct}
-          activeIncidentsCount={kpi.activeIncidents}
+          activeIncidentsCount={liveAccidents.length}
         />
 
         {/* Search Card */}
@@ -220,18 +457,76 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Active Accident Alert Banner */}
-        {accident && (
+        {/* ROUTE UPDATED / EMERGENCY ZONE AHEAD — only ever fires from a real
+            backend re-evaluation (hooks/useRouteReoptimization.ts), never
+            speculatively. One coherent banner per ANIMATED_EFFECTS.md §8,
+            styled distinctly (emergency palette) when the trigger was a
+            real accident on the active route. */}
+        {routeUpdateNotice && (
+          <div
+            className={`rounded-xl p-3 text-xs font-semibold flex items-center justify-between shadow-xs animate-pulse ${
+              routeUpdateNotice.isEmergencyZone
+                ? "bg-red-50 border border-red-300 text-red-900"
+                : "bg-emerald-50 border border-emerald-200 text-emerald-900"
+            }`}
+          >
+            <div className="flex items-center gap-2">
+              {routeUpdateNotice.isEmergencyZone ? (
+                <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+              ) : (
+                <RefreshCw className="w-4 h-4 text-emerald-600 shrink-0" />
+              )}
+              <span>
+                <strong>{routeUpdateNotice.isEmergencyZone ? "EMERGENCY ZONE AHEAD" : "ROUTE UPDATED"}</strong> —{" "}
+                {Math.round(routeUpdateNotice.previousEtaMinutes)} min →{" "}
+                {Math.round(routeUpdateNotice.nextEtaMinutes)} min. {routeUpdateNotice.reason}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ACTIVE ACCIDENT ON YOUR ROUTE — a real accident sits on the active
+            route but the backend found nothing genuinely faster than the ETA
+            already promised (an accident only ever makes the area worse, so
+            that bar often can't be cleared). Honest hazard warning, never a
+            fabricated "rerouted" claim — see EmergencyZoneWarningEvent. */}
+        {zoneWarning && (
+          <div className="rounded-xl p-3 text-xs font-semibold flex items-center justify-between shadow-xs animate-pulse bg-red-50 border border-red-300 text-red-900">
+            <div className="flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+              <span>
+                <strong>ACTIVE ACCIDENT ON YOUR ROUTE</strong> — {zoneWarning.roadName} (
+                {zoneWarning.severity.toUpperCase()}). No faster alternative was found; continue with caution.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Route Search Error — real backend/validation failures, never a silent fallback */}
+        {searchError && (
+          <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs font-semibold text-red-900 flex items-center gap-2 shadow-xs">
+            <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{searchError}</span>
+          </div>
+        )}
+
+        {/* Active Accident Alert Banner — real backend-confirmed accident state */}
+        {primaryAccident && (
           <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-xs font-semibold text-red-900 flex items-center justify-between shadow-xs animate-pulse">
             <div className="flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-red-600" />
               <span>
-                <strong>⚠ ACTIVE INCIDENT:</strong> {accident.description} on {accident.roadName}
+                <strong>⚠ ACTIVE INCIDENT:</strong> {primaryAccident.severity} severity on{" "}
+                {primaryAccident.road_name || primaryAccident.edge_id}
+                {liveAccidents.length > 1 && ` (+${liveAccidents.length - 1} more)`}
               </span>
             </div>
-            <span className="text-[10px] font-bold bg-red-600 text-white px-2 py-0.5 rounded uppercase">
-              Corridor Blocked
-            </span>
+            <button
+              onClick={() => handleResolveAccident(primaryAccident.accident_id)}
+              className="text-[10px] font-bold bg-red-600 hover:bg-red-700 text-white px-2 py-0.5 rounded uppercase transition-all"
+            >
+              Clear Accident
+            </button>
           </div>
         )}
 
@@ -239,7 +534,7 @@ export default function HomePage() {
         {showComparison && (
           <RouteComparison
             routes={routes}
-            activeRouteId={selectedRoute.id}
+            activeRouteId={selectedRoute?.id}
             onSelectRoute={(r) => setSelectedRoute(r)}
           />
         )}
@@ -249,29 +544,51 @@ export default function HomePage() {
 
           {/* LEFT: Map View & Journey Metrics */}
           <div className="lg:col-span-8 flex flex-col gap-2 h-full">
-            <NavigationBar areaName="Anna Nagar, Chennai" />
+            <NavigationBar areaName="Anna Nagar, Chennai" instruction={nextInstruction} />
+
+            {journey.arrived && (
+              <div className="bg-emerald-50 border border-emerald-300 rounded-xl p-3 text-xs font-bold text-emerald-900 flex items-center gap-2 shadow-xs">
+                <Flag className="w-4 h-4 text-emerald-600" />
+                <span>🏁 ARRIVED — Destination reached{selectedRoute ? ` via ${selectedRoute.name}` : ""}.</span>
+              </div>
+            )}
 
             <div className="h-[520px] w-full relative shadow-sm rounded-b-xl">
               <TrafficMap
-                activeRoute={selectedRoute}
-                accident={accident}
-                ambulance={ambulance}
-                isNavigating={true}
+                activeRoute={selectedRoute ?? undefined}
+                accidents={liveAccidents}
+                missions={liveMissions}
+                isNavigating={journeyStartedAt !== null}
                 riskByEdge={riskByEdge}
+                vehicles={liveVehicles}
+                journeyVehicle={
+                  journeyStartedAt !== null
+                    ? {
+                        position: journey.position,
+                        headingDeg: journey.headingDeg,
+                        traveled: journey.traveled,
+                        remaining: journey.remaining,
+                        arrived: journey.arrived,
+                      }
+                    : undefined
+                }
                 onBaselineReady={() => setMapReady(true)}
               />
             </div>
 
-            <JourneyMetrics
-              metrics={{
-                distanceCoveredKm: 1.4,
-                timeTakenMinutes: 4,
-                distanceLeftKm: Math.max(0, selectedRoute.distanceKm - 1.4),
-                timeLeftMinutes: Math.max(0, selectedRoute.etaMinutes - 4),
-                estimatedReachingTime: "17:05",
-                currentSpeedKmh: selectedRoute.averageSpeedKmh,
-              }}
-            />
+            {/* Only shown once a real route exists. Time Elapsed, Distance
+                Covered/Left, current speed and ETA are all real once a
+                journey is active (useJourneySimulation); before that,
+                Distance Covered honestly reads "not tracked" — see
+                JourneyMetrics.tsx's doc comment. */}
+            {selectedRoute && (
+              <JourneyMetrics
+                route={selectedRoute}
+                journeyStartedAt={journeyStartedAt}
+                journey={journey}
+                onStartJourney={handleStartJourney}
+              />
+            )}
           </div>
 
           {/* RIGHT: Live Messages, Accident Panel, Routes, Congestion, Legend */}
@@ -281,20 +598,22 @@ export default function HomePage() {
 
             <AccidentPanel
               onSimulateAccident={handleSimulateAccident}
-              activeAccidentRoadName={accident?.roadName}
+              activeAccidentRoadName={primaryAccident?.road_name || primaryAccident?.edge_id}
             />
+
+            <EmergencyStatusPanel mission={primaryMission} />
 
             <TopRoutes
               routes={routes}
-              selectedRouteId={selectedRoute.id}
+              selectedRouteId={selectedRoute?.id}
               onSelectRoute={(r) => setSelectedRoute(r)}
             />
 
             <CongestionBreakdown
-              lowCount={accident ? 20 : 26}
-              moderateCount={8}
-              highCount={accident ? 7 : 3}
-              congestedCount={accident ? 3 : 1}
+              lowCount={kpi.lowCount}
+              moderateCount={kpi.moderateCount}
+              highCount={kpi.highCount}
+              congestedCount={kpi.congestedCount}
             />
 
             <LegendPanel />

@@ -141,6 +141,15 @@ class RoutingService:
                 lat, lng = coord
                 coords.append(Coordinate(lat=lat, lng=lng))
 
+        # Real street names traversed, in traversal order, collapsing
+        # consecutive repeats (many SUMO edges share a name across several
+        # short segments of the same real street) and dropping unnamed edges.
+        road_names: List[str] = []
+        for edge_id in result.edge_ids:
+            name = self._graph_manager.get_edge_name(edge_id)
+            if name and (not road_names or road_names[-1] != name):
+                road_names.append(name)
+
         return CandidateRoute(
             route_id=f"route-{result.rank}",
             rank=result.rank,
@@ -150,6 +159,7 @@ class RoutingService:
             congestion_level=_congestion_level_from_score(result.avg_congestion),
             edges=result.edge_ids,
             coords=coords,
+            road_names=road_names,
         )
 
     # ------------------------------------------------------------------

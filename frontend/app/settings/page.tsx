@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import Header from "@/components/common/Header";
-import { ApplicationMode } from "@/types/common";
 import { AppSettings, DEFAULT_SETTINGS } from "@/types/settings";
 import {
   SettingsSection,
@@ -36,7 +35,6 @@ const TABS: { id: SettingsTab; label: string; icon: React.ReactNode }[] = [
 ];
 
 export default function SettingsPage() {
-  const [mode, setMode] = useState<ApplicationMode>("simulation");
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [activeTab, setActiveTab] = useState<SettingsTab>("sumo");
   const [saved, setSaved] = useState(false);
@@ -66,7 +64,7 @@ export default function SettingsPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <Header mode={mode} onModeChange={setMode} />
+      <Header />
 
       <main className="flex-1 max-w-[1200px] w-full mx-auto p-6 flex flex-col gap-6">
         {/* Page title */}

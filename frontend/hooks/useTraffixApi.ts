@@ -106,40 +106,8 @@ export function useMutation<TArg, TResult>(
   return { mutate, loading, error, data };
 }
 
-// ── WebSocket connection hook ─────────────────────────────────────────────────
-import { getWebSocketClient, WsEventType, WsMessage } from "../services/webSocketClient";
-
-export function useWebSocket<T>(
-  event: WsEventType,
-  onMessage: (payload: T) => void,
-  autoConnect = true
-) {
-  const [connected, setConnected] = useState(false);
-
-  useEffect(() => {
-    const client = getWebSocketClient();
-
-    if (autoConnect && !client.isConnected) {
-      client.connect();
-    }
-
-    const unsubStatus = client.on<{ connected: boolean }>(
-      "connection_status",
-      (msg) => setConnected(msg.payload.connected)
-    );
-
-    const unsubEvent = client.on<T>(event, (msg: WsMessage<T>) =>
-      onMessage(msg.payload)
-    );
-
-    setConnected(client.isConnected);
-
-    return () => {
-      unsubStatus();
-      unsubEvent();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [event]);
-
-  return { connected };
-}
+// Note: a generic per-event WebSocket hook used to live here, built on top of
+// services/webSocketClient.ts (a second client that connected to a
+// nonexistent endpoint and fabricated data on failure). That client has been
+// retired — see context/TraffixContext.tsx and hooks/useWebSocket.ts (the
+// real, single connection) for the app's live data.

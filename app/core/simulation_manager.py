@@ -38,7 +38,10 @@ import random
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from app.core.traffic_state import traffic_state_store
 from app.core.websocket_manager import websocket_manager
+from app.emergency.accident_manager import accident_manager
+from app.emergency.mission_manager import mission_manager
 from app.integrations.existing_ml_adapter import TrafficModelAdapter, get_model_adapter
 from app.integrations.sumo_bridge import SUMO_AVAILABLE, SumoBridge
 from app.ml.model_registry import model_registry
@@ -73,6 +76,17 @@ class SimulationManager:
         self._tick_counts: Dict[str, int] = {}
         # Track the config each simulation was started with (used for rainfall etc.).
         self._configs: Dict[str, SimulationConfig] = {}
+        # Real pause state — checked at the top of every loop iteration (see
+        # _run_simulation_loop). While paused, the loop skips TraCI/mock
+        # mutation, ML inference, and broadcasting entirely — no tick
+        # advances and no data is sent, same honest "silence = not
+        # progressing" signal Stop already gives (never a fabricated
+        # "paused" heartbeat with stale data pretending to be fresh).
+        self._paused: Dict[str, bool] = {}
+        # Real single-step requests — each call to request_step() lets
+        # exactly one full, real tick through while paused, then the loop
+        # re-pauses on the next iteration.
+        self._step_requests: Dict[str, int] = {}
         # V15 ML engine injected from main.py lifespan so the tick loop can
         # call predict() without going through app.state.
         self._ml_engine = None
@@ -138,6 +152,8 @@ class SimulationManager:
 
         self._configs[simulation_id] = config
         self._tick_counts[simulation_id] = 0
+        self._paused[simulation_id] = False
+        self._step_requests[simulation_id] = 0
 
         task: asyncio.Task[None] = asyncio.create_task(
             self._run_simulation_loop(simulation_id),
@@ -155,6 +171,45 @@ class SimulationManager:
             logger.info("Simulation %s cancelled.", simulation_id)
         self._tick_counts.pop(simulation_id, None)
         self._configs.pop(simulation_id, None)
+        self._paused.pop(simulation_id, None)
+        self._step_requests.pop(simulation_id, None)
+
+    def pause(self, simulation_id: str) -> bool:
+        """
+        Real pause — sets a flag the tick loop itself checks (see
+        _run_simulation_loop). Returns False if *simulation_id* isn't
+        currently running rather than silently "succeeding".
+        """
+        if simulation_id not in self._tasks:
+            return False
+        self._paused[simulation_id] = True
+        logger.info("Simulation %s paused.", simulation_id)
+        return True
+
+    def resume(self, simulation_id: str) -> bool:
+        """Clear the pause flag so the tick loop resumes on its next iteration."""
+        if simulation_id not in self._tasks:
+            return False
+        self._paused[simulation_id] = False
+        logger.info("Simulation %s resumed.", simulation_id)
+        return True
+
+    def request_step(self, simulation_id: str) -> bool:
+        """
+        Let exactly one real tick through while paused — the loop consumes
+        this on its next iteration, runs one full real tick (TraCI/mock
+        step, prediction, broadcast, tick increment included), then
+        re-pauses. Only meaningful while paused; harmless (and a no-op in
+        practice) otherwise since a running loop never checks this flag.
+        """
+        if simulation_id not in self._tasks:
+            return False
+        self._step_requests[simulation_id] = self._step_requests.get(simulation_id, 0) + 1
+        logger.info("Simulation %s: single step requested.", simulation_id)
+        return True
+
+    def is_paused(self, simulation_id: str) -> bool:
+        return self._paused.get(simulation_id, False)
 
     def stop_all(self) -> None:
         """Cancel every active simulation — called during server shutdown."""
@@ -203,18 +258,31 @@ class SimulationManager:
 
         for u, v, data in graph.graph.edges(data=True):
             capacity: float = float(data.get("capacity", 120))
+            # Demand is modeled off the road's undamaged ("nominal") capacity
+            # — drivers still try to use this road at the same rate even if
+            # an accident has locally reduced how much of it can actually get
+            # through. Using the live (possibly accident-reduced) capacity
+            # here instead would make vehicle_count shrink in lockstep with
+            # capacity, leaving occupancy (and therefore congestion/risk)
+            # unchanged — exactly the bug this comment is here to prevent.
+            nominal_capacity: float = float(data.get("nominal_capacity", capacity))
 
-            base_vehicles = density * capacity
-            jitter = random.uniform(-0.15, 0.15) * capacity
+            base_vehicles = density * nominal_capacity
+            jitter = random.uniform(-0.15, 0.15) * nominal_capacity
             if accident_active:
-                jitter -= 0.1 * capacity
-            vehicle_count = max(0, min(capacity * 1.5, base_vehicles + jitter))
+                jitter -= 0.1 * nominal_capacity
+            vehicle_count = max(0, min(nominal_capacity * 1.5, base_vehicles + jitter))
 
             occupancy = vehicle_count / max(1.0, capacity)
             avg_speed = max(5.0, 60.0 * (1.0 - occupancy) * (1.0 - rainfall * 0.4))
+            # Mock "stopped" count — same occupancy-driven heuristic style as
+            # avg_speed above; only used when source == "mock" (see
+            # traffic_events below, which labels every entry honestly).
+            stopped_vehicles = int(vehicle_count * max(0.0, occupancy - 0.6) * 0.8)
 
             data["vehicle_count"] = int(vehicle_count)
             data["avg_speed"] = round(avg_speed, 2)
+            data["stopped_vehicles"] = stopped_vehicles
             data["rainfall"] = rainfall
 
     def _apply_sumo_metrics_to_graph(
@@ -237,6 +305,7 @@ class SimulationManager:
                 continue
             data["vehicle_count"] = m["vehicle_count"]
             data["avg_speed"] = m["average_speed_kmh"]
+            data["stopped_vehicles"] = m["stopped_vehicles"]
             data["rainfall"] = 0.0  # TraCI does not expose rainfall
 
     async def _run_simulation_loop(self, simulation_id: str) -> None:
@@ -272,6 +341,26 @@ class SimulationManager:
 
         try:
             while True:
+                # ── Real pause / single-step ──────────────────────────────
+                # Checked at the very top of every iteration. While paused
+                # with no step requested: no TraCI/mock step, no ML
+                # inference, no broadcast, no tick advance — the same
+                # honest silence a stopped simulation already gives (never
+                # a fabricated "paused" heartbeat with stale data
+                # presented as fresh). A queued step request lets exactly
+                # one full, real tick run below, then the loop finds
+                # itself still paused on the next iteration.
+                if self._paused.get(simulation_id, False):
+                    if self._step_requests.get(simulation_id, 0) > 0:
+                        self._step_requests[simulation_id] -= 1
+                        logger.info(
+                            "Simulation %s: running one real tick for a queued step request.",
+                            simulation_id,
+                        )
+                    else:
+                        await asyncio.sleep(0.25)
+                        continue
+
                 tick = self._tick_counts[simulation_id]
                 sumo_active = bridge is not None and bridge.is_connected
                 data_source = "sumo" if sumo_active else "mock"
@@ -288,16 +377,19 @@ class SimulationManager:
                 #
                 if sumo_active:
                     sumo_step_func = functools.partial(bridge.simulation_step_and_collect)
-                    raw_metrics: list[Dict[str, Any]] = await loop.run_in_executor(
+                    raw_metrics: list[Dict[str, Any]]
+                    raw_vehicles: list[Dict[str, Any]]
+                    raw_metrics, raw_vehicles = await loop.run_in_executor(
                         bridge.executor,   # ← dedicated 1-worker pool (max_workers=1)
                         sumo_step_func,    # ← sync: step + collect in one thread call
                     )
                     if raw_metrics:
                         # Verification plan stop condition — must appear per tick.
                         logger.info(
-                            "Simulation %s: SUMO tick OK — collected %d edges from TraCI",
+                            "Simulation %s: SUMO tick OK — collected %d edges, %d vehicles from TraCI",
                             simulation_id,
                             len(raw_metrics),
+                            len(raw_vehicles),
                         )
                     else:
                         # Bridge marked itself disconnected after an error.
@@ -311,6 +403,7 @@ class SimulationManager:
                         data_source = "mock"
                 else:
                     raw_metrics = []
+                    raw_vehicles = []
 
                 # ── Step 2: Push data into the routing graph ─────────────────
                 if sumo_active and raw_metrics:
@@ -371,12 +464,28 @@ class SimulationManager:
                     congestion_score = predictions.get(
                         edge_id, float(data.get("congestion", 0.0) or 0.0)
                     )
+                    edge_speed = round(float(data.get("avg_speed", 40.0)), 1)
+                    edge_vehicle_count = int(data.get("vehicle_count", 0))
+                    # Feed the real per-tick state into traffic_state_store too
+                    # (app/core/traffic_state.py) — previously a real, correctly
+                    # -built cache that nothing ever wrote to, so every reader
+                    # (app/services/analytics_service.py, traffic_service.py)
+                    # saw it permanently empty. Same real numbers already
+                    # computed for the broadcast below, just also cached here.
+                    traffic_state_store.update(
+                        edge_id=edge_id,
+                        speed=edge_speed,
+                        vehicle_count=edge_vehicle_count,
+                        congestion_score=round(congestion_score, 4),
+                        congestion_level=CongestionLevel(_congestion_label(congestion_score)),
+                    )
                     traffic_events.append(
                         {
                             "type": UpdateType.TRAFFIC.value,
                             "edge_id": edge_id,
-                            "speed": round(float(data.get("avg_speed", 40.0)), 1),
-                            "vehicle_count": int(data.get("vehicle_count", 0)),
+                            "speed": edge_speed,
+                            "vehicle_count": edge_vehicle_count,
+                            "stopped_vehicles": int(data.get("stopped_vehicles", 0)),
                             "congestion": _congestion_label(congestion_score),
                             "congestion_score": round(congestion_score, 4),
                             "edge_cost": round(float(data.get("weight", 0.0) or 0.0), 4),
@@ -389,6 +498,66 @@ class SimulationManager:
                         }
                     )
 
+                # Individual vehicle markers — only meaningful when SUMO is
+                # actually connected; the mock sensor path has no per-vehicle
+                # data to report, so this is an honest empty list rather than
+                # a fabricated one (never invent vehicles that don't exist).
+                vehicle_events: list[Dict[str, Any]] = raw_vehicles if sumo_active else []
+
+                # Active accidents — real records from AccidentManager (see
+                # app/services/accident_service.py / app/api/accidents.py),
+                # enriched with real location/name from the graph each tick
+                # so a client that connects mid-incident sees the same state.
+                accident_events: list[Dict[str, Any]] = []
+                for record in accident_manager.active_accidents():
+                    midpoint = graph.get_edge_midpoint(record.edge_id)
+                    accident_events.append(
+                        {
+                            "accident_id": record.accident_id,
+                            "edge_id": record.edge_id,
+                            "severity": record.severity,
+                            "road_name": graph.get_edge_name(record.edge_id),
+                            "lat": midpoint[0] if midpoint else None,
+                            "lng": midpoint[1] if midpoint else None,
+                            "reported_at": record.reported_at.isoformat(),
+                        }
+                    )
+
+                # Advance every active emergency mission by one real tick,
+                # then build the broadcast entries from the resulting real
+                # state (real interpolated position along a real route —
+                # see app/emergency/mission_manager.py).
+                mission_manager.tick(tick)
+                mission_events: list[Dict[str, Any]] = []
+                for mission in mission_manager.active_missions():
+                    lat, lng = mission_manager.current_position(mission, tick)
+                    on_site_remaining = None
+                    if mission.on_site_until_tick is not None:
+                        on_site_remaining = max(0.0, mission.on_site_until_tick - tick)
+                    mission_events.append(
+                        {
+                            "mission_id": mission.mission_id,
+                            "accident_id": mission.accident_id,
+                            "edge_id": mission.edge_id,
+                            "hospital_name": mission.hospital_name,
+                            "ambulance_id": mission.ambulance_id,
+                            "unit_number": mission.unit_number,
+                            "state": mission.state.value,
+                            "lat": lat,
+                            "lng": lng,
+                            "outbound_coords": [
+                                {"lat": c[0], "lng": c[1]} for c in mission.outbound.coords
+                            ],
+                            "return_coords": (
+                                [{"lat": c[0], "lng": c[1]} for c in mission.return_route.coords]
+                                if mission.return_route
+                                else None
+                            ),
+                            "signal_priority_available": mission.signal_priority_available,
+                            "on_site_seconds_remaining": on_site_remaining,
+                        }
+                    )
+
                 payload: Dict[str, Any] = {
                     "type": UpdateType.TRAFFIC.value,
                     "simulation_id": simulation_id,
@@ -398,6 +567,9 @@ class SimulationManager:
                     "model": "v15_xgboost" if sumo_active else "v16_xgboost",
                     "source": data_source,
                     "traffic": traffic_events,
+                    "vehicles": vehicle_events,
+                    "accidents": accident_events,
+                    "emergency_missions": mission_events,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 

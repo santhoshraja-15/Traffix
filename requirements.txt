@@ -15,10 +15,22 @@ networkx>=3.3
 pandas>=2.2.0
 numpy>=1.26.0
 xgboost>=2.0.0
+scikit-learn>=1.4.0  # xgboost.XGBClassifier (sklearn wrapper API) requires this at import/load time
 joblib>=1.4.0
 
 # --- Async WebSocket support ---
 websockets>=12.0
+
+# --- Real SUMO network geometry (parses osm.net.xml.gz; independent of a
+#     full SUMO/TraCI install) + its coordinate-projection dependency ---
+sumolib==1.27.1  # pinned to match the installed netconvert version that built scenarios/*/osm.net.xml.gz
+pyproj>=3.6.0
+
+# --- Live SUMO simulation control (app/integrations/sumo_bridge.py) — was
+#     missing from this file even though the app's core feature depends on
+#     it; only usable if the `sumo`/`sumo-gui` binary is also installed and
+#     on PATH (SUMO_HOME), which this Python package alone doesn't provide.
+traci==1.27.1
 
 # --- Multipart form support (FastAPI uploads) ---
 python-multipart>=0.0.9

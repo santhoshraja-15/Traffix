@@ -41,8 +41,9 @@ from __future__ import annotations
 import collections
 import math
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
+from app.integrations.sumo_network_loader import get_real_network
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -132,6 +133,12 @@ class SumoBridge:
         # Per-edge ring buffer: deque of _EdgeSnapshot (newest at right).
         self._history: Dict[str, Deque[_EdgeSnapshot]] = {}
 
+        # Real network object (app.integrations.sumo_network_loader), used to
+        # convert live vehicle positions from SUMO's internal x/y to lon/lat
+        # with the exact same projection the static topology graph uses —
+        # never a second, independently-guessed conversion.
+        self._net: Optional[Any] = None
+
     # ------------------------------------------------------------------
     # Public properties
     # ------------------------------------------------------------------
@@ -186,6 +193,15 @@ class SumoBridge:
                     self._road_lengths[road_id] = 0.0
                 self._history[road_id] = collections.deque(maxlen=_HISTORY_DEPTH)
 
+            real_network = get_real_network()
+            self._net = real_network.net if real_network is not None else None
+            if self._net is None:
+                logger.warning(
+                    "SumoBridge.connect: real network unavailable — live vehicle "
+                    "positions cannot be converted to lon/lat and will be omitted "
+                    "from the broadcast until it loads."
+                )
+
             self._connected = True
             logger.info(
                 "SumoBridge connected -- %d road edges discovered.",
@@ -212,19 +228,24 @@ class SumoBridge:
     # The single sync callable submitted to the dedicated executor
     # ------------------------------------------------------------------
 
-    def simulation_step_and_collect(self) -> List[Dict[str, Any]]:
+    def simulation_step_and_collect(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         SYNCHRONOUS -- designed to run inside run_in_executor(bridge.executor, ...).
 
         1. Advances SUMO by one step via traci.simulationStep().
-        2. Reads per-edge vehicle metrics (road_collector_v2 algorithm).
+        2. Reads per-edge vehicle metrics (road_collector_v2 algorithm) AND
+           per-vehicle position/heading in the same pass over
+           traci.vehicle.getIDList() (one iteration, not two).
         3. Updates the per-edge history ring buffer.
-        4. Returns a list of raw metric dicts ready for V15 feature engineering.
+        4. Returns (edge_metrics, vehicles) — edge_metrics ready for V15
+           feature engineering, vehicles ready to broadcast for live map
+           markers (empty if the real network's projection isn't available,
+           since positions can't be honestly converted to lon/lat then).
 
-        Returns empty list if SUMO is not connected (caller falls back to mock).
+        Returns ([], []) if SUMO is not connected (caller falls back to mock).
         """
         if not self._connected or not SUMO_AVAILABLE:
-            return []
+            return [], []
 
         try:
             # Step 1: Advance SUMO
@@ -241,12 +262,31 @@ class SumoBridge:
                 for road_id in self._road_edges
             }
 
-            # Step 3: Accumulate vehicle telemetry
+            # Step 3: Accumulate vehicle telemetry + collect live positions
+            vehicles: List[Dict[str, Any]] = []
             for vid in traci.vehicle.getIDList():
                 road_id = traci.vehicle.getRoadID(vid)
+                speed = traci.vehicle.getSpeed(vid)
+
+                if self._net is not None:
+                    x, y = traci.vehicle.getPosition(vid)
+                    try:
+                        lng, lat = self._net.convertXY2LonLat(x, y)
+                        vehicles.append({
+                            "id": vid,
+                            "lat": lat,
+                            "lng": lng,
+                            # SUMO's vehicle angle is already compass-bearing
+                            # convention (0 = north, clockwise) — no conversion needed.
+                            "heading": traci.vehicle.getAngle(vid),
+                            "speed_kmh": round(speed * 3.6, 2),
+                            "edge_id": road_id,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass  # skip this vehicle's marker rather than broadcast a bad position
+
                 if road_id.startswith(":") or road_id not in roads:
                     continue
-                speed = traci.vehicle.getSpeed(vid)
                 waiting = traci.vehicle.getWaitingTime(vid)
                 roads[road_id]["vehicle_count"] += 1
                 roads[road_id]["total_speed"] += speed
@@ -294,17 +334,18 @@ class SumoBridge:
                 })
 
             logger.info(
-                "SumoBridge: SUMO tick OK -- collected %d edges from TraCI.",
+                "SumoBridge: SUMO tick OK -- collected %d edges, %d vehicle positions from TraCI.",
                 len(results),
+                len(vehicles),
             )
-            return results
+            return results, vehicles
 
         except Exception as exc:
             logger.error(
                 "SumoBridge.simulation_step_and_collect error: %s", exc, exc_info=True
             )
             self._connected = False  # Mark disconnected so caller falls back to mock
-            return []
+            return [], []
 
     # ------------------------------------------------------------------
     # V15 Feature Engineering

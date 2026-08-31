@@ -1,23 +1,41 @@
 "use client";
 
 import { Vehicle } from "../../types/traffic";
+import type { GeoBounds } from "../../lib/map";
+import { projectToViewBox } from "../../lib/map";
 
 interface VehicleLayerProps {
-  vehicles?: Vehicle[];
+  vehicles: Vehicle[];
+  bounds: GeoBounds;
+  width: number;
+  height: number;
 }
 
-export default function VehicleLayer({ vehicles = [] }: VehicleLayerProps) {
+/**
+ * SVG-fallback vehicle renderer (used when no Mapbox token is configured —
+ * see TrafficMap.tsx). Each vehicle is positioned from its own real/
+ * interpolated lat/lng, not a shared hardcoded offset.
+ */
+export default function VehicleLayer({ vehicles, bounds, width, height }: VehicleLayerProps) {
   if (vehicles.length === 0) return null;
 
   return (
-    <div className="contents">
-      {vehicles.map((v) => (
-        <div
-          key={v.id}
-          className="w-3 h-3 rounded-full bg-emerald-400 border border-slate-900 shadow-[0_0_8px_#34d399] flex items-center justify-center text-[8px] font-bold text-slate-950"
-          title={`Vehicle ${v.id} - ${v.speedKmh.toFixed(1)} km/h`}
-        />
-      ))}
-    </div>
+    <>
+      {vehicles.map((v) => {
+        const { x, y } = projectToViewBox(v.position.lng, v.position.lat, bounds, width, height);
+        const heading = v.headingAngle ?? 0;
+        return (
+          <g key={v.id} transform={`translate(${x.toFixed(1)}, ${y.toFixed(1)})`}>
+            <title>{`Vehicle ${v.id} — ${v.speedKmh.toFixed(1)} km/h on ${v.roadId}`}</title>
+            <circle r={4} fill="#34d399" stroke="#0f172a" strokeWidth={1} />
+            <path
+              d="M 0 -6 L 3 0 L 0 -1.5 L -3 0 Z"
+              fill="#34d399"
+              transform={`rotate(${heading})`}
+            />
+          </g>
+        );
+      })}
+    </>
   );
 }

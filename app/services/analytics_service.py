@@ -12,6 +12,7 @@ from typing import List
 
 from app.core.traffic_state import traffic_state_store
 from app.models.analysis_models import AIInsightMessage
+from app.routing.graph_manager import get_road_network_graph
 from app.utils.constants import CongestionLevel, SeverityLevel
 from app.utils.logging import get_logger
 
@@ -55,26 +56,34 @@ class AnalyticsService:
                 )
             ]
 
+        # Real OSM street name when this edge has one (~44% of edges do —
+        # see app/integrations/sumo_network_loader.py); falls back to the
+        # raw edge_id honestly rather than guessing a name.
+        graph = get_road_network_graph()
+
         insights: List[AIInsightMessage] = []
         for state in states:
             cong_pct = int(state.congestion_score * 100)
             severity = _severity_for_congestion(state.congestion_level)
             delay_s = state.congestion_score * 300  # rough delay: up to 5 min
+            road_name = graph.get_edge_name(state.edge_id) or f"edge {state.edge_id}"
 
             insights.append(
                 AIInsightMessage(
                     insight_id=str(uuid.uuid4()),
                     severity=severity,
-                    title=f"High congestion on edge {state.edge_id}",
+                    title=f"High congestion on {road_name}",
                     description=(
-                        f"Edge {state.edge_id} is at {cong_pct}% congestion "
+                        f"{road_name} ({state.edge_id}) is at {cong_pct}% congestion "
                         f"({state.congestion_level.value}). "
                         f"Current speed: {state.speed:.1f} km/h with "
                         f"{state.vehicle_count} vehicles."
                     ),
                     recommendation=(
-                        "Consider rerouting traffic via alternative edges or "
-                        "adjusting signal timing to reduce queue length."
+                        "Consider rerouting traffic via alternative edges. "
+                        "(No real traffic-signal control is available in this "
+                        "deployment — see app/emergency/mission_manager.py's "
+                        "signal_priority_available disclosure.)"
                     ),
                     estimated_delay=round(delay_s, 1),
                 )
