@@ -48,7 +48,7 @@
 
 ## Overview
 
-Traffix treats intelligent routing as an end-to-end engineering problem rather than only a map or shortest-path problem.
+Traffix treats intelligent routing as an end-to-end engineering problem rather than only a map / shortest-path problem.
 
 The system connects:
 
