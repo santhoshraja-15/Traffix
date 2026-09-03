@@ -788,7 +788,7 @@ From the repository root:
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8010
 ```
 
-A healthy startup should report model loading and, when SUMO is configured correctly, messages similar to:
+A  startup should report model loading and, when SUMO is configured correctly, messages similar to:
 
 ```text
 TrafficModelAdapter ... [LOADED]
